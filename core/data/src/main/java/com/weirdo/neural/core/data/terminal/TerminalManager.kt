@@ -131,7 +131,7 @@ class TerminalManager @Inject constructor(
                                 entry.linkFlag == TarConstants.LF_SYMLINK -> {
                                     outFile.parentFile?.mkdirs()
                                     try {
-                                        if (outFile.exists() || outFile.isSymbolicLink) {
+                                        if (outFile.exists() || java.nio.file.Files.isSymbolicLink(outFile.toPath())) {
                                             outFile.delete()
                                         }
                                         android.system.Os.symlink(
