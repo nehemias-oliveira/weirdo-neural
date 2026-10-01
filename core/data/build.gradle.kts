@@ -27,6 +27,7 @@ dependencies {
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
     implementation(libs.okhttp)
+    implementation(libs.commons.compress)
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
 }
