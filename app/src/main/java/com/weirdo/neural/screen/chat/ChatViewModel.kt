@@ -15,7 +15,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
@@ -28,8 +27,19 @@ class ChatViewModel @Inject constructor(
     private val modelsRepo: ModelsRepository,
 ) : ViewModel() {
 
+    /**
+     * Uma mensagem da UI. Carrega estatísticas de geração que só fazem
+     * sentido para respostas da IA (tokens, tempo, cancelamento).
+     */
+    data class UiMessage(
+        val message: ChatMessage,
+        val tokensGenerated: Int = 0,
+        val durationMs: Long = 0L,
+        val wasCancelled: Boolean = false,
+    )
+
     data class UiState(
-        val messages: List<ChatMessage> = emptyList(),
+        val messages: List<UiMessage> = emptyList(),
         val input: String = "",
         val isGenerating: Boolean = false,
         val isModelLoaded: Boolean = false,
@@ -47,7 +57,6 @@ class ChatViewModel @Inject constructor(
     private var loadedModelId: String? = null
 
     init {
-        // Sincroniza com o motor
         viewModelScope.launch {
             engine.isLoaded.collect { loaded ->
                 _uiState.update { it.copy(isModelLoaded = loaded) }
@@ -59,8 +68,6 @@ class ChatViewModel @Inject constructor(
             }
         }
 
-        // Observa o modelo ativo escolhido na aba Modelos.
-        // Quando muda, descarrega o atual e carrega o novo.
         viewModelScope.launch {
             settings.activeModelId
                 .distinctUntilChanged()
@@ -145,12 +152,13 @@ class ChatViewModel @Inject constructor(
         val text = _uiState.value.input.trim()
         if (text.isEmpty() || !_uiState.value.isModelLoaded) return
 
-        val userMsg = ChatMessage(Role.USER, text)
-        val history = _uiState.value.messages + userMsg
+        val userMsg = UiMessage(ChatMessage(Role.USER, text))
+        val history = _uiState.value.messages.map { it.message } + userMsg.message
 
         _uiState.update {
             it.copy(
-                messages = history + ChatMessage(Role.ASSISTANT, ""),
+                messages = _uiState.value.messages + userMsg +
+                    UiMessage(ChatMessage(Role.ASSISTANT, "")),
                 input = "",
                 isGenerating = true,
                 error = null,
@@ -162,6 +170,7 @@ class ChatViewModel @Inject constructor(
         generationJob = viewModelScope.launch {
             val buffer = StringBuilder()
             var tokenCount = 0
+            val startMs = System.currentTimeMillis()
             try {
                 engine.generate(
                     messages = history,
@@ -179,10 +188,14 @@ class ChatViewModel @Inject constructor(
                     buffer.append(token)
                     tokenCount++
                     val snapshot = buffer.toString()
+                    val elapsed = System.currentTimeMillis() - startMs
                     _uiState.update { state ->
                         state.copy(
-                            messages = state.messages.dropLast(1) +
-                                ChatMessage(Role.ASSISTANT, snapshot),
+                            messages = state.messages.dropLast(1) + UiMessage(
+                                message = ChatMessage(Role.ASSISTANT, snapshot),
+                                tokensGenerated = tokenCount,
+                                durationMs = elapsed,
+                            ),
                             tokensGenerated = tokenCount,
                         )
                     }
@@ -199,7 +212,16 @@ class ChatViewModel @Inject constructor(
         engine.cancelGeneration()
         generationJob?.cancel()
         generationJob = null
-        _uiState.update { it.copy(isGenerating = false) }
+        _uiState.update { state ->
+            val updated = state.messages.toMutableList()
+            if (updated.isNotEmpty()) {
+                val last = updated.last()
+                if (last.message.role == Role.ASSISTANT) {
+                    updated[updated.lastIndex] = last.copy(wasCancelled = true)
+                }
+            }
+            state.copy(messages = updated, isGenerating = false)
+        }
     }
 
     fun clearError() {

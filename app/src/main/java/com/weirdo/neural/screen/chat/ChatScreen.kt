@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -40,7 +41,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.weirdo.neural.core.llm.model.ChatMessage
 import com.weirdo.neural.core.llm.model.Role
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -59,7 +59,7 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(state.messages.lastOrNull()?.content) {
+    LaunchedEffect(state.messages.lastOrNull()?.message?.content) {
         if (state.messages.isNotEmpty() && isAtBottom) {
             listState.animateScrollToItem(state.messages.size - 1)
         }
@@ -134,7 +134,7 @@ fun ChatScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (!state.isModelLoaded) {
-                        Spacer(Modifier.width(8.dp))
+                        Spacer(Modifier.height(8.dp))
                         TextButton(onClick = onNavigateToModels) {
                             Text("Abrir Modelos")
                         }
@@ -149,9 +149,11 @@ fun ChatScreen(
                 ) {
                     itemsIndexed(
                         items = state.messages,
-                        key = { _, msg -> "${msg.role}-${msg.createdAtOrHash()}" },
-                    ) { _, msg ->
-                        MessageBubble(msg)
+                        key = { _, item ->
+                            "${item.message.role}-${item.message.content.hashCode()}"
+                        },
+                    ) { _, item ->
+                        MessageBubble(item)
                     }
                 }
             }
@@ -207,27 +209,50 @@ fun ChatScreen(
 }
 
 @Composable
-private fun MessageBubble(msg: ChatMessage) {
+private fun MessageBubble(item: ChatViewModel.UiMessage) {
+    val msg = item.message
     val isUser = msg.role == Role.USER
-    Row(
+    val showStats = !isUser && item.tokensGenerated > 0
+
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
-        Surface(
-            color = if (isUser) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.widthIn(max = 320.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
         ) {
+            Surface(
+                color = if (isUser) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.widthIn(max = 320.dp),
+            ) {
+                Text(
+                    text = msg.content,
+                    modifier = Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+
+        if (showStats) {
+            Spacer(Modifier.height(2.dp))
             Text(
-                text = msg.content,
-                modifier = Modifier.padding(12.dp),
-                style = MaterialTheme.typography.bodyMedium,
+                text = buildString {
+                    append("${item.tokensGenerated} tokens")
+                    val secs = item.durationMs / 1000.0
+                    if (secs > 0) append(" · %.1fs".format(secs))
+                    if (item.tokensGenerated > 0 && secs > 0) {
+                        val tps = item.tokensGenerated / secs
+                        append(" · %.1f t/s".format(tps))
+                    }
+                    if (item.wasCancelled) append(" · cancelado")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp),
             )
         }
     }
-}
-
-private fun ChatMessage.createdAtOrHash(): Int {
-    return (role.name.hashCode() * 31 + content.hashCode())
 }

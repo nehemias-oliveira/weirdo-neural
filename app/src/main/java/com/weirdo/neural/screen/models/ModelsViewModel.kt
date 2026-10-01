@@ -10,10 +10,12 @@ import com.weirdo.neural.core.data.repo.DownloadProgress
 import com.weirdo.neural.core.data.repo.ModelsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -38,6 +40,14 @@ class ModelsViewModel @Inject constructor(
     private val settings: SettingsRepository,
 ) : ViewModel() {
 
+    sealed interface UiEvent {
+        data class Message(val text: String) : UiEvent
+        data object ImportOk : UiEvent
+        data object ImportFail : UiEvent
+        data object DeleteOk : UiEvent
+        data object DownloadOk : UiEvent
+    }
+
     private val _catalog = MutableStateFlow<List<ModelInfo>>(emptyList())
     private val _installed = MutableStateFlow<Map<String, InstalledModelEntity>>(emptyMap())
     private val _downloads = MutableStateFlow<Map<String, DownloadProgress>>(emptyMap())
@@ -46,6 +56,9 @@ class ModelsViewModel @Inject constructor(
     private val _loading = MutableStateFlow(true)
     private val _error = MutableStateFlow<String?>(null)
     private val _importing = MutableStateFlow(false)
+
+    private val _events = Channel<UiEvent>(Channel.BUFFERED)
+    val events = _events.receiveAsFlow()
 
     private val downloadJobs = mutableMapOf<String, Job>()
 
@@ -130,6 +143,9 @@ class ModelsViewModel @Inject constructor(
             try {
                 repo.download(info).collect { progress ->
                     _downloads.value = _downloads.value + (info.id to progress)
+                    if (progress is DownloadProgress.Completed) {
+                        _events.send(UiEvent.DownloadOk)
+                    }
                 }
             } finally {
                 kotlinx.coroutines.delay(2_000)
@@ -153,6 +169,7 @@ class ModelsViewModel @Inject constructor(
                 if (_activeModelId.value == modelId) {
                     settings.setActiveModel(null)
                 }
+                _events.send(UiEvent.DeleteOk)
             } catch (t: Throwable) {
                 _error.value = "Falha ao excluir: ${t.message}"
             }
@@ -169,8 +186,10 @@ class ModelsViewModel @Inject constructor(
             _error.value = null
             try {
                 repo.importFromUri(uri)
+                _events.send(UiEvent.ImportOk)
             } catch (t: Throwable) {
                 _error.value = "Falha ao importar: ${t.message}"
+                _events.send(UiEvent.ImportFail)
             } finally {
                 _importing.value = false
             }
