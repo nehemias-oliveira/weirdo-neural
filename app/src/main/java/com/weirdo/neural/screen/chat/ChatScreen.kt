@@ -1,7 +1,5 @@
 package com.weirdo.neural.screen.chat
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,11 +11,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -33,7 +33,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -44,17 +46,21 @@ import com.weirdo.neural.core.llm.model.Role
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
+    onNavigateToModels: () -> Unit,
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
-    val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri -> uri?.let { viewModel.loadModelFromUri(it) } }
-
     val listState = rememberLazyListState()
 
-    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content) {
-        if (state.messages.isNotEmpty()) {
+    val isAtBottom by remember {
+        derivedStateOf {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= state.messages.size - 2
+        }
+    }
+
+    LaunchedEffect(state.messages.lastOrNull()?.content) {
+        if (state.messages.isNotEmpty() && isAtBottom) {
             listState.animateScrollToItem(state.messages.size - 1)
         }
     }
@@ -65,32 +71,25 @@ fun ChatScreen(
                 title = {
                     Column {
                         Text("Chat", style = MaterialTheme.typography.titleMedium)
-                        state.modelName?.let { name ->
-                            Text(
-                                text = name,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                        Text(
+                            text = state.modelName ?: "Nenhum modelo carregado",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (state.isModelLoaded)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 },
                 actions = {
-                    if (!state.isModelLoaded) {
-                        TextButton(onClick = { launcher.launch(arrayOf("*/*")) }) {
-                            Text("Carregar")
-                        }
-                    } else {
-                        TextButton(onClick = { launcher.launch(arrayOf("*/*")) }) {
-                            Text("Trocar")
-                        }
+                    IconButton(onClick = onNavigateToModels) {
+                        Icon(Icons.Default.SwapHoriz, contentDescription = "Trocar modelo")
                     }
                 },
             )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier.fillMaxSize().padding(padding)
-        ) {
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             state.error?.let { err ->
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
@@ -101,11 +100,8 @@ fun ChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(12.dp),
                     ) {
-                        Text(
-                            text = err,
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                        Text(err, modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall)
                         IconButton(onClick = viewModel::clearError) {
                             Icon(Icons.Default.Close, contentDescription = "Fechar")
                         }
@@ -131,12 +127,18 @@ fun ChatScreen(
                     val msg = if (state.isModelLoaded)
                         "Modelo carregado. Manda a primeira mensagem."
                     else
-                        "Toque em \"Carregar\" para escolher um arquivo .gguf"
+                        "Nenhum modelo ativo.\nVá em \"Modelos\" e escolha um."
                     Text(
                         text = msg,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (!state.isModelLoaded) {
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = onNavigateToModels) {
+                            Text("Abrir Modelos")
+                        }
+                    }
                 }
             } else {
                 LazyColumn(
@@ -145,9 +147,27 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(vertical = 8.dp),
                 ) {
-                    items(state.messages.size) { idx ->
-                        MessageBubble(state.messages[idx])
+                    itemsIndexed(
+                        items = state.messages,
+                        key = { _, msg -> "${msg.role}-${msg.createdAtOrHash()}" },
+                    ) { _, msg ->
+                        MessageBubble(msg)
                     }
+                }
+            }
+
+            if (state.isGenerating) {
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val elapsed = (System.currentTimeMillis() - state.generationStartMs) / 1000
+                    Text(
+                        text = "${state.tokensGenerated} tokens · ${elapsed}s",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 
@@ -206,4 +226,8 @@ private fun MessageBubble(msg: ChatMessage) {
             )
         }
     }
+}
+
+private fun ChatMessage.createdAtOrHash(): Int {
+    return (role.name.hashCode() * 31 + content.hashCode())
 }

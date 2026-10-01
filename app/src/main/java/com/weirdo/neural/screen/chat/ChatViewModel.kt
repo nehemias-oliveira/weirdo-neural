@@ -1,11 +1,9 @@
 package com.weirdo.neural.screen.chat
 
-import android.content.Context
-import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.weirdo.neural.core.data.prefs.SettingsRepository
+import com.weirdo.neural.core.data.repo.ModelsRepository
 import com.weirdo.neural.core.llm.engine.LlmEngine
 import com.weirdo.neural.core.llm.model.ChatMessage
 import com.weirdo.neural.core.llm.model.LoadProgress
@@ -13,24 +11,21 @@ import com.weirdo.neural.core.llm.model.ModelConfig
 import com.weirdo.neural.core.llm.model.Role
 import com.weirdo.neural.core.llm.model.SamplerParams
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 import javax.inject.Inject
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     private val engine: LlmEngine,
     private val settings: SettingsRepository,
-    @ApplicationContext private val context: Context,
+    private val modelsRepo: ModelsRepository,
 ) : ViewModel() {
 
     data class UiState(
@@ -41,14 +36,18 @@ class ChatViewModel @Inject constructor(
         val modelName: String? = null,
         val statusMessage: String? = null,
         val error: String? = null,
+        val tokensGenerated: Int = 0,
+        val generationStartMs: Long = 0L,
     )
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState = _uiState.asStateFlow()
 
     private var generationJob: Job? = null
+    private var loadedModelId: String? = null
 
     init {
+        // Sincroniza com o motor
         viewModelScope.launch {
             engine.isLoaded.collect { loaded ->
                 _uiState.update { it.copy(isModelLoaded = loaded) }
@@ -59,68 +58,68 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(modelName = name) }
             }
         }
-        // Auto-carrega o último modelo se o engine ainda não estiver carregado
+
+        // Observa o modelo ativo escolhido na aba Modelos.
+        // Quando muda, descarrega o atual e carrega o novo.
         viewModelScope.launch {
-            if (!engine.isLoaded.value) {
-                val path = settings.lastModelPath.first()
-                if (!path.isNullOrBlank() && File(path).exists()) {
-                    loadModelFromPath(path)
+            settings.activeModelId
+                .distinctUntilChanged()
+                .collect { modelId ->
+                    if (modelId == null) {
+                        engine.unload()
+                        loadedModelId = null
+                        _uiState.update {
+                            it.copy(
+                                isModelLoaded = false,
+                                modelName = null,
+                                statusMessage = null,
+                                error = null,
+                            )
+                        }
+                    } else if (modelId != loadedModelId) {
+                        loadModelById(modelId)
+                    }
                 }
-            }
         }
     }
 
-    fun onInputChange(text: String) {
-        _uiState.update { it.copy(input = text) }
-    }
-
-    fun loadModelFromUri(uri: Uri) {
+    private fun loadModelById(modelId: String) {
         viewModelScope.launch {
-            try {
-                _uiState.update { it.copy(statusMessage = "Importando modelo...", error = null) }
-                val path = withContext(Dispatchers.IO) { importModel(uri) }
-                loadModelFromPath(path)
-            } catch (t: Throwable) {
+            _uiState.update { it.copy(error = null, statusMessage = "Carregando modelo…") }
+            val entity = modelsRepo.findInstalled(modelId)
+            if (entity == null) {
                 _uiState.update {
-                    it.copy(error = "Erro ao importar: ${t.message}", statusMessage = null)
+                    it.copy(
+                        error = "Modelo não encontrado: $modelId",
+                        statusMessage = null,
+                    )
                 }
+                return@launch
             }
-        }
-    }
-
-    private fun importModel(uri: Uri): String {
-        val modelsDir = File(context.getExternalFilesDir(null), "models").apply { mkdirs() }
-        val displayName = queryDisplayName(uri) ?: "model.gguf"
-        val target = File(modelsDir, displayName)
-
-        // Se já existe com tamanho > 0, assume que já foi copiado
-        if (target.exists() && target.length() > 0) return target.absolutePath
-
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(target).use { output ->
-                input.copyTo(output, bufferSize = 1024 * 1024)
+            val file = File(entity.absolutePath)
+            if (!file.exists()) {
+                _uiState.update {
+                    it.copy(
+                        error = "Arquivo não existe: ${entity.fileName}",
+                        statusMessage = null,
+                    )
+                }
+                return@launch
             }
-        } ?: throw IllegalStateException("Não foi possível abrir o arquivo")
 
-        return target.absolutePath
-    }
-
-    private fun queryDisplayName(uri: Uri): String? {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0 && cursor.moveToFirst()) return cursor.getString(idx)
-        }
-        return null
-    }
-
-    private fun loadModelFromPath(path: String) {
-        viewModelScope.launch {
-            engine.loadModel(ModelConfig(path = path)).collect { progress ->
+            engine.loadModel(
+                ModelConfig(
+                    path = file.absolutePath,
+                    contextSize = entity.contextSize,
+                    threads = 4,
+                )
+            ).collect { progress ->
                 when (progress) {
                     is LoadProgress.Loading -> _uiState.update {
                         it.copy(statusMessage = progress.message)
                     }
                     is LoadProgress.Ready -> {
+                        loadedModelId = modelId
                         _uiState.update {
                             it.copy(
                                 statusMessage = null,
@@ -129,7 +128,6 @@ class ChatViewModel @Inject constructor(
                                 modelName = progress.modelName,
                             )
                         }
-                        settings.setLastModelPath(path)
                     }
                     is LoadProgress.Error -> _uiState.update {
                         it.copy(error = progress.message, statusMessage = null)
@@ -137,6 +135,10 @@ class ChatViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    fun onInputChange(text: String) {
+        _uiState.update { it.copy(input = text) }
     }
 
     fun send() {
@@ -152,11 +154,14 @@ class ChatViewModel @Inject constructor(
                 input = "",
                 isGenerating = true,
                 error = null,
+                tokensGenerated = 0,
+                generationStartMs = System.currentTimeMillis(),
             )
         }
 
         generationJob = viewModelScope.launch {
             val buffer = StringBuilder()
+            var tokenCount = 0
             try {
                 engine.generate(
                     messages = history,
@@ -167,16 +172,18 @@ class ChatViewModel @Inject constructor(
                         minP = 0.05f,
                         repeatPenalty = 1.1f,
                         repeatLastN = 64,
-                        maxTokens = 512,
+                        maxTokens = 2048,
                     ),
                     systemPrompt = null,
                 ).collect { token ->
                     buffer.append(token)
+                    tokenCount++
                     val snapshot = buffer.toString()
                     _uiState.update { state ->
                         state.copy(
                             messages = state.messages.dropLast(1) +
-                                ChatMessage(Role.ASSISTANT, snapshot)
+                                ChatMessage(Role.ASSISTANT, snapshot),
+                            tokensGenerated = tokenCount,
                         )
                     }
                 }

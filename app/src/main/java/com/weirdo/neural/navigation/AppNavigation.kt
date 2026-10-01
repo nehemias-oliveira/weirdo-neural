@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -21,6 +22,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.weirdo.neural.screen.chat.ChatScreen
+import com.weirdo.neural.screen.models.ModelsScreen
 import com.weirdo.neural.screen.settings.SettingsScreen
 import com.weirdo.neural.screen.terminal.TerminalScreen
 
@@ -31,6 +33,7 @@ fun AppNavigation() {
     val navController = rememberNavController()
     val items = listOf(
         NavItem(Route.Chat, "Chat", Icons.Filled.Chat),
+        NavItem(Route.Models, "Modelos", Icons.Filled.Storage),
         NavItem(Route.Terminal, "Terminal", Icons.Filled.Terminal),
         NavItem(Route.Settings, "Settings", Icons.Filled.Settings),
     )
@@ -63,7 +66,17 @@ fun AppNavigation() {
             startDestination = Route.Chat.path,
             modifier = Modifier.padding(padding),
         ) {
-            composable(Route.Chat.path) { ChatScreen() }
+            composable(Route.Chat.path) {
+                ChatScreen(
+                    onNavigateToModels = {
+                        navController.navigate(Route.Models.path) {
+                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                            launchSingleTop = true
+                        }
+                    }
+                )
+            }
+            composable(Route.Models.path) { ModelsScreen() }
             composable(Route.Terminal.path) { TerminalScreen() }
             composable(Route.Settings.path) { SettingsScreen() }
         }
