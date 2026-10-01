@@ -23,3 +23,5 @@ rootProject.name = "weirdo.neural"
 include(":app")
 include(":core:ui")
 include(":core:data")
+include(":core:llm")
+include(":core:llm-llamacpp")
