@@ -14,7 +14,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
@@ -27,10 +26,6 @@ class ChatViewModel @Inject constructor(
     private val modelsRepo: ModelsRepository,
 ) : ViewModel() {
 
-    /**
-     * Uma mensagem da UI. Carrega estatísticas de geração que só fazem
-     * sentido para respostas da IA (tokens, tempo, cancelamento).
-     */
     data class UiMessage(
         val message: ChatMessage,
         val tokensGenerated: Int = 0,
@@ -43,7 +38,9 @@ class ChatViewModel @Inject constructor(
         val input: String = "",
         val isGenerating: Boolean = false,
         val isModelLoaded: Boolean = false,
-        val modelName: String? = null,
+        val isLoadingModel: Boolean = false,
+        val activeModelId: String? = null,
+        val activeModelDisplayName: String? = null,
         val statusMessage: String? = null,
         val error: String? = null,
         val tokensGenerated: Int = 0,
@@ -62,43 +59,81 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(isModelLoaded = loaded) }
             }
         }
+
+        // Rastreia o modelo escolhido na aba Modelos.
+        // NÃO carrega automaticamente: apenas resolve o nome de exibição.
+        // Se um modelo estava carregado e o usuário troca, descarrega.
         viewModelScope.launch {
-            engine.loadedModelName.collect { name ->
-                _uiState.update { it.copy(modelName = name) }
+            settings.activeModelId.collect { modelId ->
+                val previousId = _uiState.value.activeModelId
+                if (modelId == previousId) return@collect
+
+                // Modelo mudou → descarrega o atual se estava carregado
+                if (_uiState.value.isModelLoaded) {
+                    engine.unload()
+                    loadedModelId = null
+                }
+
+                val displayName = if (modelId == null) null
+                    else modelsRepo.findInstalled(modelId)?.displayName
+
+                _uiState.update {
+                    it.copy(
+                        activeModelId = modelId,
+                        activeModelDisplayName = displayName,
+                        isModelLoaded = false,
+                        statusMessage = null,
+                        error = null,
+                    )
+                }
             }
         }
+    }
 
-        viewModelScope.launch {
-            settings.activeModelId
-                .distinctUntilChanged()
-                .collect { modelId ->
-                    if (modelId == null) {
-                        engine.unload()
-                        loadedModelId = null
-                        _uiState.update {
-                            it.copy(
-                                isModelLoaded = false,
-                                modelName = null,
-                                statusMessage = null,
-                                error = null,
-                            )
-                        }
-                    } else if (modelId != loadedModelId) {
-                        loadModelById(modelId)
-                    }
+    /** Chamado pelo botão de ligar/desligar no topo do chat. */
+    fun toggleModelEnabled() {
+        if (_uiState.value.isModelLoaded) {
+            // Desligar
+            engine.unload()
+            loadedModelId = null
+            _uiState.update {
+                it.copy(
+                    isModelLoaded = false,
+                    isLoadingModel = false,
+                    statusMessage = null,
+                )
+            }
+        } else {
+            // Ligar
+            val modelId = _uiState.value.activeModelId
+            if (modelId == null) {
+                _uiState.update {
+                    it.copy(error = "Nenhum modelo selecionado. Vá em Modelos.")
                 }
+                return
+            }
+            if (loadedModelId != modelId) {
+                loadModelById(modelId)
+            }
         }
     }
 
     private fun loadModelById(modelId: String) {
         viewModelScope.launch {
-            _uiState.update { it.copy(error = null, statusMessage = "Carregando modelo…") }
+            _uiState.update {
+                it.copy(
+                    error = null,
+                    isLoadingModel = true,
+                    statusMessage = "Carregando modelo…",
+                )
+            }
             val entity = modelsRepo.findInstalled(modelId)
             if (entity == null) {
                 _uiState.update {
                     it.copy(
                         error = "Modelo não encontrado: $modelId",
                         statusMessage = null,
+                        isLoadingModel = false,
                     )
                 }
                 return@launch
@@ -109,6 +144,7 @@ class ChatViewModel @Inject constructor(
                     it.copy(
                         error = "Arquivo não existe: ${entity.fileName}",
                         statusMessage = null,
+                        isLoadingModel = false,
                     )
                 }
                 return@launch
@@ -132,12 +168,16 @@ class ChatViewModel @Inject constructor(
                                 statusMessage = null,
                                 error = null,
                                 isModelLoaded = true,
-                                modelName = progress.modelName,
+                                isLoadingModel = false,
                             )
                         }
                     }
                     is LoadProgress.Error -> _uiState.update {
-                        it.copy(error = progress.message, statusMessage = null)
+                        it.copy(
+                            error = progress.message,
+                            statusMessage = null,
+                            isLoadingModel = false,
+                        )
                     }
                 }
             }
