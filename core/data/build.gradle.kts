@@ -17,12 +17,14 @@ android {
 }
 
 dependencies {
+    // 'api' porque os tipos aparecem na assinatura pública do módulo
+    api(libs.kotlinx.coroutines.android)
+    api(libs.datastore.preferences)
+
     implementation(libs.androidx.core.ktx)
-    implementation(libs.kotlinx.coroutines.android)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
-    implementation(libs.datastore.preferences)
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
 }
