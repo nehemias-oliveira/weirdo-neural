@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">weirdo.neural</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_terminal">Terminal</string>
+    <string name="nav_settings">Settings</string>
+</resources>
