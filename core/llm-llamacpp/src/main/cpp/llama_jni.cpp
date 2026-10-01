@@ -22,10 +22,6 @@ struct LlamaHandle {
 
 static bool g_backend_initialized = false;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 static std::string jstring_to_std(JNIEnv* env, jstring js) {
     if (!js) return {};
     const char* c = env->GetStringUTFChars(js, nullptr);
@@ -34,16 +30,11 @@ static std::string jstring_to_std(JNIEnv* env, jstring js) {
     return s;
 }
 
-// Chama callback.onToken(String) no objeto Kotlin
 static void call_on_token(JNIEnv* env, jobject cb, jmethodID mid, const std::string& tok) {
     jstring jtok = env->NewStringUTF(tok.c_str());
     env->CallVoidMethod(cb, mid, jtok);
     env->DeleteLocalRef(jtok);
 }
-
-// ---------------------------------------------------------------------------
-// Backend
-// ---------------------------------------------------------------------------
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeBackendInit(
@@ -63,22 +54,19 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeBackendFree(
     LOGI("Backend liberado");
 }
 
-// ---------------------------------------------------------------------------
-// Load / Free
-// ---------------------------------------------------------------------------
-
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeLoadModel(
         JNIEnv* env, jobject,
         jstring jpath, jint n_ctx, jint n_threads, jboolean use_mmap) {
 
     std::string path = jstring_to_std(env, jpath);
-    LOGI("Carregando modelo: %s (ctx=%d, threads=%d, mmap=%d)",
+    LOGI("Carregando modelo: %s (ctx=%d, threads=%d, mmap_req=%d)",
          path.c_str(), n_ctx, n_threads, (int)use_mmap);
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = 0;
-    mparams.use_mmap     = use_mmap;
+    // Nota: 'use_mmap' e 'use_mlock' não existem mais nesta versão.
+    // O mmap é gerenciado internamente pelo loader.
 
     llama_model* model = llama_model_load_from_file(path.c_str(), mparams);
     if (!model) {
@@ -104,8 +92,7 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeLoadModel(
     h->ctx   = ctx;
     h->vocab = llama_model_get_vocab(model);
 
-    LOGI("Modelo carregado. n_ctx efetivo = %u",
-         llama_n_ctx(ctx));
+    LOGI("Modelo carregado. n_ctx efetivo = %u", llama_n_ctx(ctx));
 
     return reinterpret_cast<jlong>(h);
 }
@@ -121,10 +108,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeFreeModel(
     LOGI("Modelo liberado");
 }
 
-// ---------------------------------------------------------------------------
-// Chat template
-// ---------------------------------------------------------------------------
-
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGetChatTemplate(
         JNIEnv* env, jobject, jlong handle) {
@@ -134,10 +117,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGetChatTemplate(
     if (!tmpl) return nullptr;
     return env->NewStringUTF(tmpl);
 }
-
-// ---------------------------------------------------------------------------
-// Tokenizer
-// ---------------------------------------------------------------------------
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeCountTokens(
@@ -150,10 +129,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeCountTokens(
     return n;
 }
 
-// ---------------------------------------------------------------------------
-// Generate
-// ---------------------------------------------------------------------------
-
 extern "C" JNIEXPORT void JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
         JNIEnv* env, jobject, jlong handle, jstring jprompt,
@@ -164,7 +139,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
     auto* h = reinterpret_cast<LlamaHandle*>(handle);
     if (!h || !h->ctx) return;
 
-    // Refs para o callback
     jclass cb_class = env->GetObjectClass(callback);
     jmethodID mid_on_token = env->GetMethodID(cb_class, "onToken", "(Ljava/lang/String;)V");
     jmethodID mid_on_done  = env->GetMethodID(cb_class, "onDone",  "()V");
@@ -181,7 +155,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
 
     std::string prompt = jstring_to_std(env, jprompt);
 
-    // Tokeniza
     int n_prompt = -llama_tokenize(h->vocab, prompt.c_str(), prompt.size(),
                                    nullptr, 0, true, true);
     if (n_prompt <= 0) {
@@ -194,10 +167,8 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
     llama_tokenize(h->vocab, prompt.c_str(), prompt.size(),
                    tokens.data(), tokens.size(), true, true);
 
-    // Limpa memória KV antes de cada geração
     llama_memory_clear(llama_get_memory(h->ctx), true);
 
-    // Decode do prompt
     llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
     if (llama_decode(h->ctx, batch) != 0) {
         env->CallVoidMethod(callback, mid_on_error,
@@ -205,12 +176,14 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
         return;
     }
 
-    // Sampler chain
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler* smpl = llama_sampler_chain_init(sparams);
+
+    // CORREÇÃO: llama_sampler_init_penalties agora exige n_vocab como 1º arg
+    const int32_t n_vocab = llama_vocab_n_tokens(h->vocab);
     if (repeat_last_n > 0 && repeat_penalty != 1.0f) {
         llama_sampler_chain_add(smpl,
-            llama_sampler_init_penalties(repeat_last_n, repeat_penalty, 0.0f, 0.0f));
+            llama_sampler_init_penalties(n_vocab, repeat_last_n, repeat_penalty, 0.0f, 0.0f));
     }
     if (top_k > 0) {
         llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
@@ -222,11 +195,10 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
         llama_sampler_chain_add(smpl, llama_sampler_init_min_p(min_p, 1));
     }
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(smpl, llama_sampler_init_dist(seed >= 0 ? (uint32_t)seed : LLAMA_DEFAULT_SEED));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(
+        seed >= 0 ? (uint32_t)seed : LLAMA_DEFAULT_SEED));
 
-    // Loop de geração
     int n_generated = 0;
-    int n_pos = n_prompt;
 
     while (n_generated < max_tokens) {
         if (h->cancel_flag.load()) {
@@ -243,7 +215,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
 
         llama_sampler_accept(smpl, new_token);
 
-        // Converte token para string
         char buf[256];
         int n = llama_token_to_piece(h->vocab, new_token, buf, sizeof(buf), 0, true);
         if (n > 0) {
@@ -251,7 +222,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
             call_on_token(env, callback, mid_on_token, piece);
         }
 
-        // Prepara próximo batch
         batch = llama_batch_get_one(&new_token, 1);
         if (llama_decode(h->ctx, batch) != 0) {
             env->CallVoidMethod(callback, mid_on_error,
@@ -260,7 +230,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
             return;
         }
 
-        n_pos++;
         n_generated++;
     }
 
