@@ -24,17 +24,16 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          accept-android-sdk-licenses: true
-
       - name: Accept SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
+        run: |
+          SDKMANAGER=$(find $ANDROID_HOME/cmdline-tools -name sdkmanager | head -n 1)
+          echo "Usando sdkmanager: $SDKMANAGER"
+          yes | $SDKMANAGER --licenses > /dev/null 2>&1 || true
 
       - name: Install NDK and CMake
         run: |
-          yes | sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
+          SDKMANAGER=$(find $ANDROID_HOME/cmdline-tools -name sdkmanager | head -n 1)
+          yes | $SDKMANAGER --install "ndk;27.2.12479018" "cmake;3.22.1" || true
           echo "=== NDK directory ==="
           ls -la "$ANDROID_HOME/ndk/" || true
           echo "=== CMake directory ==="
@@ -54,12 +53,3 @@ jobs:
         with:
           name: weirdo-neural-debug
           path: app/build/outputs/apk/debug/*.apk
-
-      - name: Upload build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            **/build/outputs/logs/*.txt
-            **/build/reports/**
