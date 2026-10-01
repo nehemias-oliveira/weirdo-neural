@@ -32,7 +32,8 @@ class ModelsRepository @Inject constructor(
         File(context.getExternalFilesDir(null), "models").apply { mkdirs() }
     }
 
-    fun getModelsDir(): File = modelsDir
+    /** Caminho da pasta onde os modelos são salvos. */
+    fun modelsDirectory(): File = modelsDir
 
     fun getPartialFile(fileName: String): File = File(modelsDir, "$fileName.part")
 
@@ -59,7 +60,6 @@ class ModelsRepository @Inject constructor(
     fun download(info: ModelInfo): Flow<DownloadProgress> = flow {
         val target = File(modelsDir, info.fileName)
 
-        // Já existe completo? Registra e encerra.
         if (target.exists() && target.length() == info.sizeBytes) {
             Log.i(TAG, "${info.fileName} já existe, registrando")
             installedDao.upsert(info.toEntity(target))
@@ -89,7 +89,7 @@ class ModelsRepository @Inject constructor(
     }
 
     // -----------------------------------------------------------------------
-    // Importação via SAF (compartilhada com o Chat)
+    // Importação via SAF
     // -----------------------------------------------------------------------
 
     suspend fun importFromUri(uri: Uri): InstalledModelEntity = withContext(Dispatchers.IO) {
