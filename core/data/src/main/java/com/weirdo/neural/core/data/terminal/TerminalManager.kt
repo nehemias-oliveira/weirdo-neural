@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.archivers.tar.TarConstants
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.BufferedInputStream
 import java.io.File
@@ -43,11 +44,6 @@ class TerminalManager @Inject constructor(
     private val libShmem: File
         get() = File(alpineDir, "libandroid-shmem.so")
 
-    /**
-     * Pasta compartilhada entre o Android e o Alpine.
-     * No Android: getExternalFilesDir()/workspace/
-     * No Alpine: /workspace/
-     */
     val workspaceDir: File
         get() = File(context.getExternalFilesDir(null), "workspace").apply { mkdirs() }
 
@@ -69,7 +65,6 @@ class TerminalManager @Inject constructor(
         emit(PrepareProgress.Starting)
 
         try {
-            // 1. Binários
             emit(PrepareProgress.ExtractingBinaries)
             copyAsset("proot", prootBinary)
             copyAsset("libtalloc.so.2", libTalloc)
@@ -78,21 +73,17 @@ class TerminalManager @Inject constructor(
             libTalloc.setReadable(true, false)
             libShmem.setReadable(true, false)
 
-            // 2. Rootfs
             emit(PrepareProgress.ExtractingRootfs(0))
             rootfsDir.mkdirs()
             extractRootfs()
             emit(PrepareProgress.ExtractingRootfs(100))
 
-            // 3. DNS padrão
             val resolv = File(rootfsDir, "etc/resolv.conf")
             resolv.parentFile?.mkdirs()
             resolv.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
 
-            // 4. Workspace dentro do rootfs (o bind cobre isso, mas garante o dir)
             File(rootfsDir, "workspace").mkdirs()
 
-            // 5. Flag
             File(alpineDir, READY_FLAG).writeText(System.currentTimeMillis().toString())
 
             Log.i(TAG, "Alpine pronto em ${alpineDir.absolutePath}")
@@ -137,7 +128,7 @@ class TerminalManager @Inject constructor(
                             when {
                                 entry.isDirectory -> outFile.mkdirs()
 
-                                entry.isSymbolicLink -> {
+                                entry.linkFlag == TarConstants.LF_SYMLINK -> {
                                     outFile.parentFile?.mkdirs()
                                     try {
                                         if (outFile.exists() || outFile.isSymbolicLink) {
@@ -152,7 +143,7 @@ class TerminalManager @Inject constructor(
                                     }
                                 }
 
-                                entry.isLink -> {
+                                entry.linkFlag == TarConstants.LF_LINK -> {
                                     outFile.parentFile?.mkdirs()
                                     try {
                                         if (outFile.exists()) outFile.delete()
@@ -198,7 +189,6 @@ class TerminalManager @Inject constructor(
             return@callbackFlow
         }
 
-        // Garante o workspace no host
         workspaceDir.mkdirs()
 
         val args = listOf(
@@ -235,7 +225,6 @@ class TerminalManager @Inject constructor(
             return@callbackFlow
         }
 
-        // Thread 1: lê stdout
         val stdoutThread = Thread {
             try {
                 process.inputStream.bufferedReader().useLines { lines ->
@@ -246,7 +235,6 @@ class TerminalManager @Inject constructor(
             } catch (_: Throwable) { /* pipe fechado */ }
         }
 
-        // Thread 2: lê stderr
         val stderrThread = Thread {
             try {
                 process.errorStream.bufferedReader().useLines { lines ->
@@ -260,7 +248,6 @@ class TerminalManager @Inject constructor(
         stdoutThread.start()
         stderrThread.start()
 
-        // Thread 3: aguarda término e fecha o flow
         val waiterThread = Thread {
             try {
                 stdoutThread.join()
@@ -279,7 +266,6 @@ class TerminalManager @Inject constructor(
             try {
                 if (process.isAlive) {
                     process.destroy()
-                    // Se em 2s não morrer, mata
                     if (!process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
                         process.destroyForcibly()
                     }
