@@ -21,15 +21,20 @@ class SettingsRepository @Inject constructor(
         val THEME_DARK = booleanPreferencesKey("theme_dark")
         val AUTO_EXECUTE = booleanPreferencesKey("auto_execute_tools")
         val ACTIVE_MODEL = stringPreferencesKey("active_model_id")
+        val LAST_MODEL_PATH = stringPreferencesKey("last_model_path")
     }
 
     val darkTheme: Flow<Boolean> = context.dataStore.data.map { it[Keys.THEME_DARK] ?: true }
     val autoExecuteTools: Flow<Boolean> = context.dataStore.data.map { it[Keys.AUTO_EXECUTE] ?: false }
     val activeModelId: Flow<String?> = context.dataStore.data.map { it[Keys.ACTIVE_MODEL] }
+    val lastModelPath: Flow<String?> = context.dataStore.data.map { it[Keys.LAST_MODEL_PATH] }
 
     suspend fun setDarkTheme(v: Boolean) = context.dataStore.edit { it[Keys.THEME_DARK] = v }
     suspend fun setAutoExecute(v: Boolean) = context.dataStore.edit { it[Keys.AUTO_EXECUTE] = v }
     suspend fun setActiveModel(id: String?) = context.dataStore.edit {
         if (id == null) it.remove(Keys.ACTIVE_MODEL) else it[Keys.ACTIVE_MODEL] = id
+    }
+    suspend fun setLastModelPath(path: String?) = context.dataStore.edit {
+        if (path == null) it.remove(Keys.LAST_MODEL_PATH) else it[Keys.LAST_MODEL_PATH] = path
     }
 }
