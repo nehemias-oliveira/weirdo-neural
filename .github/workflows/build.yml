@@ -27,17 +27,16 @@ jobs:
       - name: Accept SDK licenses
         run: |
           SDKMANAGER=$(find $ANDROID_HOME/cmdline-tools -name sdkmanager | head -n 1)
-          echo "Usando sdkmanager: $SDKMANAGER"
           yes | $SDKMANAGER --licenses > /dev/null 2>&1 || true
 
       - name: Install NDK and CMake
         run: |
           SDKMANAGER=$(find $ANDROID_HOME/cmdline-tools -name sdkmanager | head -n 1)
           yes | $SDKMANAGER --install "ndk;27.2.12479018" "cmake;3.22.1" || true
-          echo "=== NDK directory ==="
           ls -la "$ANDROID_HOME/ndk/" || true
-          echo "=== CMake directory ==="
-          ls -la "$ANDROID_HOME/cmake/" || true
+
+      - name: Build termux proot
+        run: .github/scripts/build-proot.sh "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4

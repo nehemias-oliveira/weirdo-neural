@@ -12,8 +12,9 @@ import com.weirdo.neural.core.llm.model.LoadProgress
 import com.weirdo.neural.core.llm.model.ModelConfig
 import com.weirdo.neural.core.llm.model.Role
 import com.weirdo.neural.core.llm.model.SamplerParams
+import com.weirdo.neural.service.GenerationController
+import com.weirdo.neural.service.GenerationState
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -27,6 +28,7 @@ class ChatViewModel @Inject constructor(
     private val settings: SettingsRepository,
     private val modelsRepo: ModelsRepository,
     private val conversationRepo: ConversationRepository,
+    private val generation: GenerationController,
 ) : ViewModel() {
 
     data class UiMessage(
@@ -56,17 +58,29 @@ class ChatViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(UiState())
     val uiState = _uiState.asStateFlow()
 
-    private var generationJob: Job? = null
     private var loadedModelId: String? = null
 
     init {
+        observeEngine()
+        observeActiveModel()
+        observeConversations()
+        observeGeneration()
+        openRecentOrCreate()
+    }
+
+    // -----------------------------------------------------------------------
+    // Observadores
+    // -----------------------------------------------------------------------
+
+    private fun observeEngine() {
         viewModelScope.launch {
             engine.isLoaded.collect { loaded ->
                 _uiState.update { it.copy(isModelLoaded = loaded) }
             }
         }
+    }
 
-        // Observa modelo ativo escolhido na aba Modelos
+    private fun observeActiveModel() {
         viewModelScope.launch {
             settings.activeModelId.collect { modelId ->
                 val previousId = _uiState.value.activeModelId
@@ -91,21 +105,171 @@ class ChatViewModel @Inject constructor(
                 }
             }
         }
+    }
 
-        // Observa a lista de conversas
+    private fun observeConversations() {
         viewModelScope.launch {
             conversationRepo.observeAll().collect { list ->
                 _uiState.update { it.copy(conversations = list) }
             }
         }
+    }
 
-        // Reabre a conversa mais recente ou cria uma nova
+    /**
+     * Observa o GenerationController. Isso é o que sobrevive a mudanças
+     * de tela: se o usuário sair do chat e voltar, o estado continua sendo
+     * refletido porque a geração vive no controller (escopo da aplicação).
+     */
+    private fun observeGeneration() {
+        viewModelScope.launch {
+            generation.state.collect { gs ->
+                when (gs) {
+                    is GenerationState.Idle -> {
+                        _uiState.update {
+                            it.copy(
+                                isGenerating = false,
+                                tokensGenerated = 0,
+                                generationStartMs = 0L,
+                            )
+                        }
+                    }
+
+                    is GenerationState.Running -> {
+                        val elapsed = System.currentTimeMillis() - gs.startedAt
+                        _uiState.update { state ->
+                            val updated = if (state.messages.isEmpty() ||
+                                state.messages.last().message.role != Role.ASSISTANT
+                            ) {
+                                // Caso raro: voltamos e o estado foi perdido.
+                                // Recria a mensagem do assistente com o buffer atual.
+                                state.messages + UiMessage(
+                                    message = ChatMessage(Role.ASSISTANT, gs.buffer),
+                                    tokensGenerated = gs.tokensGenerated,
+                                    durationMs = elapsed,
+                                )
+                            } else {
+                                state.messages.dropLast(1) + UiMessage(
+                                    message = ChatMessage(Role.ASSISTANT, gs.buffer),
+                                    tokensGenerated = gs.tokensGenerated,
+                                    durationMs = elapsed,
+                                )
+                            }
+                            state.copy(
+                                messages = updated,
+                                isGenerating = true,
+                                tokensGenerated = gs.tokensGenerated,
+                                generationStartMs = gs.startedAt,
+                            )
+                        }
+                    }
+
+                    is GenerationState.Completed -> {
+                        val convId = _uiState.value.conversationId
+                        val finalText = gs.finalText
+                        if (convId != null && finalText.isNotBlank()) {
+                            viewModelScope.launch {
+                                conversationRepo.addMessage(
+                                    conversationId = convId,
+                                    role = "assistant",
+                                    content = finalText,
+                                    modelId = gs.modelId,
+                                )
+                            }
+                        }
+                        _uiState.update { state ->
+                            val updated = if (state.messages.isEmpty() ||
+                                state.messages.last().message.role != Role.ASSISTANT
+                            ) {
+                                state.messages + UiMessage(
+                                    message = ChatMessage(Role.ASSISTANT, finalText),
+                                    tokensGenerated = gs.tokensGenerated,
+                                    durationMs = gs.durationMs,
+                                )
+                            } else {
+                                state.messages.dropLast(1) + UiMessage(
+                                    message = ChatMessage(Role.ASSISTANT, finalText),
+                                    tokensGenerated = gs.tokensGenerated,
+                                    durationMs = gs.durationMs,
+                                )
+                            }
+                            state.copy(
+                                messages = updated,
+                                isGenerating = false,
+                                tokensGenerated = 0,
+                                generationStartMs = 0L,
+                            )
+                        }
+                        generation.consumeTerminal()
+                    }
+
+                    is GenerationState.Failed -> {
+                        val convId = _uiState.value.conversationId
+                        val partial = gs.partialText
+                        if (convId != null && !partial.isNullOrBlank()) {
+                            viewModelScope.launch {
+                                conversationRepo.addMessage(
+                                    conversationId = convId,
+                                    role = "assistant",
+                                    content = "$partial\n\n_[interrompido: ${gs.message}]_",
+                                    modelId = null,
+                                )
+                            }
+                        }
+                        _uiState.update {
+                            it.copy(
+                                isGenerating = false,
+                                error = gs.message,
+                                tokensGenerated = 0,
+                                generationStartMs = 0L,
+                            )
+                        }
+                        generation.consumeTerminal()
+                    }
+
+                    is GenerationState.Cancelled -> {
+                        val convId = _uiState.value.conversationId
+                        val partial = (_uiState.value.messages.lastOrNull()
+                            ?.takeIf { it.message.role == Role.ASSISTANT }
+                            ?.message?.content) ?: ""
+                        if (convId != null && partial.isNotBlank()) {
+                            viewModelScope.launch {
+                                conversationRepo.addMessage(
+                                    conversationId = convId,
+                                    role = "assistant",
+                                    content = "$partial\n\n_[cancelado]_",
+                                    modelId = null,
+                                )
+                            }
+                        }
+                        _uiState.update { state ->
+                            val updated = state.messages.toMutableList()
+                            if (updated.isNotEmpty() &&
+                                updated.last().message.role == Role.ASSISTANT
+                            ) {
+                                updated[updated.lastIndex] =
+                                    updated.last().copy(wasCancelled = true)
+                            }
+                            state.copy(
+                                messages = updated,
+                                isGenerating = false,
+                                tokensGenerated = 0,
+                                generationStartMs = 0L,
+                            )
+                        }
+                        generation.consumeTerminal()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun openRecentOrCreate() {
         viewModelScope.launch {
             val recent = conversationRepo.findMostRecent()
             if (recent != null) {
-                openConversation(recent.id)
+                openConversationInternal(recent.id)
             } else {
-                createNewConversation()
+                createNewConversationInternal()
             }
         }
     }
@@ -115,63 +279,56 @@ class ChatViewModel @Inject constructor(
     // -----------------------------------------------------------------------
 
     fun createNewConversation() {
-        viewModelScope.launch {
-            val id = conversationRepo.createConversation()
-            _uiState.update {
-                it.copy(
-                    conversationId = id,
-                    conversationTitle = "Nova conversa",
-                    messages = emptyList(),
-                    input = "",
-                    error = null,
-                    tokensGenerated = 0,
-                )
-            }
+        viewModelScope.launch { createNewConversationInternal() }
+    }
+
+    private suspend fun createNewConversationInternal() {
+        val id = conversationRepo.createConversation()
+        _uiState.update {
+            it.copy(
+                conversationId = id,
+                conversationTitle = "Nova conversa",
+                messages = emptyList(),
+                input = "",
+                error = null,
+                tokensGenerated = 0,
+            )
         }
     }
 
     fun openConversation(conversationId: Long) {
-        viewModelScope.launch {
-            val entity = conversationRepo.findConversation(conversationId)
-                ?: return@launch
-            // Não permite trocar durante geração
-            if (_uiState.value.isGenerating) {
-                _uiState.update {
-                    it.copy(error = "Aguarde a geração terminar antes de trocar de conversa.")
-                }
-                return@launch
-            }
-            val messages = conversationRepo.listMessages(conversationId)
+        viewModelScope.launch { openConversationInternal(conversationId) }
+    }
+
+    private suspend fun openConversationInternal(conversationId: Long) {
+        if (_uiState.value.isGenerating) {
             _uiState.update {
-                it.copy(
-                    conversationId = conversationId,
-                    conversationTitle = entity.title,
-                    messages = messages.map { m ->
-                        UiMessage(
-                            message = ChatMessage(
-                                role = m.role.toRole(),
-                                content = m.content,
-                            ),
-                        )
-                    },
-                    input = "",
-                    error = null,
-                )
+                it.copy(error = "Aguarde a geração terminar antes de trocar de conversa.")
             }
+            return
+        }
+        val entity = conversationRepo.findConversation(conversationId) ?: return
+        val messages = conversationRepo.listMessages(conversationId)
+        _uiState.update {
+            it.copy(
+                conversationId = conversationId,
+                conversationTitle = entity.title,
+                messages = messages.map { m ->
+                    UiMessage(ChatMessage(role = m.role.toRole(), content = m.content))
+                },
+                input = "",
+                error = null,
+            )
         }
     }
 
     fun deleteConversation(conversationId: Long) {
         viewModelScope.launch {
             conversationRepo.deleteConversation(conversationId)
-            // Se apagou a atual, abre a próxima ou cria uma nova
             if (_uiState.value.conversationId == conversationId) {
                 val recent = conversationRepo.findMostRecent()
-                if (recent != null) {
-                    openConversation(recent.id)
-                } else {
-                    createNewConversation()
-                }
+                if (recent != null) openConversationInternal(recent.id)
+                else createNewConversationInternal()
             }
         }
     }
@@ -193,11 +350,7 @@ class ChatViewModel @Inject constructor(
             engine.unload()
             loadedModelId = null
             _uiState.update {
-                it.copy(
-                    isModelLoaded = false,
-                    isLoadingModel = false,
-                    statusMessage = null,
-                )
+                it.copy(isModelLoaded = false, isLoadingModel = false, statusMessage = null)
             }
         } else {
             val modelId = _uiState.value.activeModelId
@@ -207,20 +360,14 @@ class ChatViewModel @Inject constructor(
                 }
                 return
             }
-            if (loadedModelId != modelId) {
-                loadModelById(modelId)
-            }
+            if (loadedModelId != modelId) loadModelById(modelId)
         }
     }
 
     private fun loadModelById(modelId: String) {
         viewModelScope.launch {
             _uiState.update {
-                it.copy(
-                    error = null,
-                    isLoadingModel = true,
-                    statusMessage = "Carregando modelo…",
-                )
+                it.copy(error = null, isLoadingModel = true, statusMessage = "Carregando modelo…")
             }
             val entity = modelsRepo.findInstalled(modelId)
             if (entity == null) {
@@ -280,7 +427,7 @@ class ChatViewModel @Inject constructor(
     }
 
     // -----------------------------------------------------------------------
-    // Input + geração
+    // Envio
     // -----------------------------------------------------------------------
 
     fun onInputChange(text: String) {
@@ -290,130 +437,56 @@ class ChatViewModel @Inject constructor(
     fun send() {
         val text = _uiState.value.input.trim()
         if (text.isEmpty() || !_uiState.value.isModelLoaded) return
-        val conversationId = _uiState.value.conversationId ?: return
+        if (_uiState.value.isGenerating) return
+        val convId = _uiState.value.conversationId ?: return
 
         val userMsg = UiMessage(ChatMessage(Role.USER, text))
         val history = _uiState.value.messages.map { it.message } + userMsg.message
-        val isFirstMessage = _uiState.value.messages.isEmpty()
+        val isFirst = _uiState.value.messages.isEmpty()
 
+        // UI: adiciona user + assistant vazio
         _uiState.update {
             it.copy(
-                messages = _uiState.value.messages + userMsg +
-                    UiMessage(ChatMessage(Role.ASSISTANT, "")),
+                messages = it.messages + userMsg + UiMessage(ChatMessage(Role.ASSISTANT, "")),
                 input = "",
-                isGenerating = true,
                 error = null,
-                tokensGenerated = 0,
-                generationStartMs = System.currentTimeMillis(),
             )
         }
 
-        // Persiste a mensagem do usuário
+        // Persiste o user
         viewModelScope.launch {
             conversationRepo.addMessage(
-                conversationId = conversationId,
+                conversationId = convId,
                 role = "user",
                 content = text,
-                generateTitle = isFirstMessage,
+                generateTitle = isFirst,
             )
-            if (isFirstMessage) {
-                // Atualiza o título exibido
-                val entity = conversationRepo.findConversation(conversationId)
+            if (isFirst) {
+                val entity = conversationRepo.findConversation(convId)
                 if (entity != null) {
                     _uiState.update { it.copy(conversationTitle = entity.title) }
                 }
             }
         }
 
-        val activeModelId = _uiState.value.activeModelId
-
-        generationJob = viewModelScope.launch {
-            val buffer = StringBuilder()
-            var tokenCount = 0
-            val startMs = System.currentTimeMillis()
-            var lastEmitMs = 0L
-            val emitIntervalMs = 60L
-
-            fun emitSnapshot(force: Boolean = false) {
-                val now = System.currentTimeMillis()
-                if (!force && now - lastEmitMs < emitIntervalMs) return
-                lastEmitMs = now
-                val snapshot = buffer.toString()
-                val elapsed = now - startMs
-                _uiState.update { state ->
-                    state.copy(
-                        messages = state.messages.dropLast(1) + UiMessage(
-                            message = ChatMessage(Role.ASSISTANT, snapshot),
-                            tokensGenerated = tokenCount,
-                            durationMs = elapsed,
-                        ),
-                        tokensGenerated = tokenCount,
-                    )
-                }
-            }
-
-            try {
-                engine.generate(
-                    messages = history,
-                    params = SamplerParams(
-                        temperature = 0.7f,
-                        topK = 40,
-                        topP = 0.9f,
-                        minP = 0.05f,
-                        repeatPenalty = 1.1f,
-                        repeatLastN = 64,
-                        maxTokens = 2048,
-                    ),
-                    systemPrompt = null,
-                ).collect { token ->
-                    buffer.append(token)
-                    tokenCount++
-                    emitSnapshot()
-                }
-                emitSnapshot(force = true)
-
-                // Persiste a resposta completa
-                val finalContent = buffer.toString()
-                if (finalContent.isNotBlank()) {
-                    conversationRepo.addMessage(
-                        conversationId = conversationId,
-                        role = "assistant",
-                        content = finalContent,
-                        modelId = activeModelId,
-                    )
-                }
-            } catch (t: Throwable) {
-                _uiState.update { it.copy(error = t.message ?: "Erro na geração") }
-                // Persiste o que foi gerado até agora (se algo)
-                val partial = buffer.toString()
-                if (partial.isNotBlank()) {
-                    conversationRepo.addMessage(
-                        conversationId = conversationId,
-                        role = "assistant",
-                        content = "$partial\n\n_[interrompido]_",
-                        modelId = activeModelId,
-                    )
-                }
-            } finally {
-                _uiState.update { it.copy(isGenerating = false) }
-            }
-        }
+        // Inicia a geração no controller
+        generation.start(
+            history = history,
+            params = SamplerParams(
+                temperature = 0.7f,
+                topK = 40,
+                topP = 0.9f,
+                minP = 0.05f,
+                repeatPenalty = 1.1f,
+                repeatLastN = 64,
+                maxTokens = 2048,
+            ),
+            modelId = _uiState.value.activeModelId,
+        )
     }
 
     fun stop() {
-        engine.cancelGeneration()
-        generationJob?.cancel()
-        generationJob = null
-        _uiState.update { state ->
-            val updated = state.messages.toMutableList()
-            if (updated.isNotEmpty()) {
-                val last = updated.last()
-                if (last.message.role == Role.ASSISTANT) {
-                    updated[updated.lastIndex] = last.copy(wasCancelled = true)
-                }
-            }
-            state.copy(messages = updated, isGenerating = false)
-        }
+        generation.cancel()
     }
 
     fun clearError() {
