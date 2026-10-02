@@ -46,7 +46,6 @@ class TerminalManager @Inject constructor(
     private val prootBinary: File
         get() = File(nativeLibDir, PROOT_NAME)
 
-    /** Libs copiadas para filesDir (o Android não extrai .so com sufixo numérico). */
     private val libTalloc: File
         get() = File(alpineDir, LIBTALLOC_NAME)
 
@@ -62,10 +61,6 @@ class TerminalManager @Inject constructor(
             && libTalloc.exists()
             && File(rootfsDir, "bin/busybox").exists()
 
-    // -----------------------------------------------------------------------
-    // Prepare (primeira execução)
-    // -----------------------------------------------------------------------
-
     fun prepare(): Flow<PrepareProgress> = flow {
         if (isReady) {
             emit(PrepareProgress.Ready)
@@ -79,12 +74,10 @@ class TerminalManager @Inject constructor(
 
             if (!prootBinary.exists()) {
                 throw IllegalStateException(
-                    "proot não encontrado em ${prootBinary.absolutePath}.\n" +
-                    "Verifique se jniLibs/arm64-v8a/libproot.so existe no projeto."
+                    "proot não encontrado em ${prootBinary.absolutePath}"
                 )
             }
 
-            // Copia as libs de assets para filesDir/alpine/
             copyAsset(LIBTALLOC_NAME, libTalloc)
             copyAsset(LIBSHMEM_NAME, libShmem)
             libTalloc.setReadable(true, false)
@@ -141,21 +134,27 @@ class TerminalManager @Inject constructor(
             return
         }
 
+        var entryCount = 0
+        var skipped = 0
+        var symlinks = 0
+
         context.assets.open(ROOTFS_ASSET).use { raw ->
             BufferedInputStream(raw).use { buffered ->
                 GzipCompressorInputStream(buffered).use { gzip ->
                     TarArchiveInputStream(gzip).use { tar ->
                         var entry = tar.nextEntry
                         while (entry != null) {
-                            val outFile = File(rootfsDir, entry.name)
-                            val canonicalTarget = outFile.canonicalPath
-                            val canonicalRoot = rootfsDir.canonicalPath
-
-                            if (!canonicalTarget.startsWith(canonicalRoot)) {
-                                Log.w(TAG, "Path traversal ignorado: ${entry.name}")
+                            entryCount++
+                            val name = entry.name
+                            // Bloqueio simples e confiável
+                            if (name.contains("..")) {
+                                Log.w(TAG, "Path traversal ignorado: $name")
+                                skipped++
                                 entry = tar.nextEntry
                                 continue
                             }
+
+                            val outFile = File(rootfsDir, name)
 
                             when {
                                 entry.isDirectory -> outFile.mkdirs()
@@ -166,12 +165,10 @@ class TerminalManager @Inject constructor(
                                         if (outFile.exists() || java.nio.file.Files.isSymbolicLink(outFile.toPath())) {
                                             outFile.delete()
                                         }
-                                        android.system.Os.symlink(
-                                            entry.linkName,
-                                            outFile.absolutePath,
-                                        )
+                                        android.system.Os.symlink(entry.linkName, outFile.absolutePath)
+                                        symlinks++
                                     } catch (t: Throwable) {
-                                        Log.w(TAG, "symlink falhou ${entry.name}: ${t.message}")
+                                        Log.w(TAG, "symlink falhou $name -> ${entry.linkName}: ${t.message}")
                                     }
                                 }
 
@@ -184,7 +181,7 @@ class TerminalManager @Inject constructor(
                                             outFile.absolutePath,
                                         )
                                     } catch (t: Throwable) {
-                                        Log.w(TAG, "hardlink falhou ${entry.name}: ${t.message}")
+                                        Log.w(TAG, "hardlink falhou $name: ${t.message}")
                                     }
                                 }
 
@@ -195,8 +192,8 @@ class TerminalManager @Inject constructor(
                                     }
                                     val mode = entry.mode
                                     if (mode and 0b001_000_000 != 0) outFile.setExecutable(true, false)
-                                    if (mode and 0b000_100_000 != 0) outFile.setReadable(true, false)
-                                    if (mode and 0b000_010_000 != 0) outFile.setWritable(true, false)
+                                    // Garante leitura para todos os arquivos regulares
+                                    outFile.setReadable(true, false)
                                 }
                             }
                             entry = tar.nextEntry
@@ -205,23 +202,42 @@ class TerminalManager @Inject constructor(
                 }
             }
         }
-    }
 
-    // -----------------------------------------------------------------------
-    // Execute
-    // -----------------------------------------------------------------------
+        Log.i(TAG, "Extração concluída: $entryCount entradas, $skipped ignoradas, $symlinks symlinks")
+    }
 
     fun execute(
         command: String,
         workingDir: String = "/workspace",
     ): Flow<TerminalLine> = callbackFlow {
         if (!isReady) {
-            trySend(TerminalLine(TerminalStream.STDERR, "Alpine não preparado. Chame prepare()."))
+            trySend(TerminalLine(TerminalStream.STDERR, "Alpine não preparado."))
             close()
             return@callbackFlow
         }
 
         workspaceDir.mkdirs()
+
+        // ============ DIAGNÓSTICO PRÉ-EXECUÇÃO ============
+        val busybox = File(rootfsDir, "bin/busybox")
+        val musl = File(rootfsDir, "lib/ld-musl-aarch64.so.1")
+        val sh = File(rootfsDir, "bin/sh")
+
+        trySend(TerminalLine(TerminalStream.STDERR, "--- diag ---"))
+        trySend(TerminalLine(TerminalStream.STDERR,
+            "busybox: exists=${busybox.exists()} exec=${busybox.canExecute()} len=${busybox.length()}"))
+        trySend(TerminalLine(TerminalStream.STDERR,
+            "musl:    exists=${musl.exists()} read=${musl.canRead()} len=${musl.length()}"))
+        trySend(TerminalLine(TerminalStream.STDERR,
+            "sh:      exists=${sh.exists()} symlink=${java.nio.file.Files.isSymbolicLink(sh.toPath())}"))
+        trySend(TerminalLine(TerminalStream.STDERR,
+            "proot:   exists=${prootBinary.exists()} exec=${prootBinary.canExecute()} path=${prootBinary.absolutePath}"))
+        trySend(TerminalLine(TerminalStream.STDERR,
+            "libtalloc:  exists=${libTalloc.exists()} len=${libTalloc.length()}"))
+        trySend(TerminalLine(TerminalStream.STDERR,
+            "libshmem:   exists=${libShmem.exists()} len=${libShmem.length()}"))
+        trySend(TerminalLine(TerminalStream.STDERR, "------------"))
+        // ============ FIM DIAGNÓSTICO ============
 
         val args = listOf(
             prootBinary.absolutePath,
@@ -244,9 +260,6 @@ class TerminalManager @Inject constructor(
 
         val pb = ProcessBuilder(args)
         pb.environment().clear()
-        // LD_LIBRARY_PATH aponta para filesDir/alpine onde estão libtalloc e libandroid-shmem.
-        // O proot em si está em nativeLibraryDir (executável), mas suas dependências
-        // dinâmicas são resolvidas por este path.
         pb.environment()["LD_LIBRARY_PATH"] = alpineDir.absolutePath
         pb.environment()["PROOT_TMP_DIR"] = context.cacheDir.absolutePath
         pb.environment()["PROOT_NO_SECCOMP"] = "1"
@@ -263,21 +276,17 @@ class TerminalManager @Inject constructor(
         val stdoutThread = Thread {
             try {
                 process.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        trySend(TerminalLine(TerminalStream.STDOUT, line))
-                    }
+                    lines.forEach { line -> trySend(TerminalLine(TerminalStream.STDOUT, line)) }
                 }
-            } catch (_: Throwable) { /* pipe fechado */ }
+            } catch (_: Throwable) { }
         }
 
         val stderrThread = Thread {
             try {
                 process.errorStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        trySend(TerminalLine(TerminalStream.STDERR, line))
-                    }
+                    lines.forEach { line -> trySend(TerminalLine(TerminalStream.STDERR, line)) }
                 }
-            } catch (_: Throwable) { /* pipe fechado */ }
+            } catch (_: Throwable) { }
         }
 
         stdoutThread.start()
@@ -290,7 +299,6 @@ class TerminalManager @Inject constructor(
                 val exit = process.waitFor()
                 trySend(TerminalLine(TerminalStream.EXIT, exit.toString()))
             } catch (_: Throwable) {
-                // cancelado
             } finally {
                 close()
             }
@@ -305,14 +313,10 @@ class TerminalManager @Inject constructor(
                         process.destroyForcibly()
                     }
                 }
-            } catch (_: Throwable) { /* ignorar */ }
+            } catch (_: Throwable) { }
         }
     }.flowOn(Dispatchers.IO)
 }
-
-// ---------------------------------------------------------------------------
-// Tipos de domínio
-// ---------------------------------------------------------------------------
 
 sealed interface PrepareProgress {
     data object Starting : PrepareProgress
@@ -322,13 +326,6 @@ sealed interface PrepareProgress {
     data class Error(val message: String, val cause: Throwable? = null) : PrepareProgress
 }
 
-enum class TerminalStream {
-    STDOUT,
-    STDERR,
-    EXIT,
-}
+enum class TerminalStream { STDOUT, STDERR, EXIT }
 
-data class TerminalLine(
-    val stream: TerminalStream,
-    val text: String,
-)
+data class TerminalLine(val stream: TerminalStream, val text: String)
