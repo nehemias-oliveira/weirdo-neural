@@ -30,11 +30,58 @@ static std::string jstring_to_std(JNIEnv* env, jstring js) {
     return s;
 }
 
-static void call_on_token(JNIEnv* env, jobject cb, jmethodID mid, const std::string& tok) {
-    jstring jtok = env->NewStringUTF(tok.c_str());
+// ---------------------------------------------------------------------------
+// UTF-8 → UTF-16 (com tratamento de sequências multi-byte e surrogates)
+// Retorna número de bytes consumidos. Append do UTF-16 em `out`.
+// ---------------------------------------------------------------------------
+static size_t utf8_decode(const std::string& s, std::u16string& out) {
+    out.clear();
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        uint32_t cp;
+        size_t n;
+
+        if (c < 0x80) { cp = c; n = 1; }
+        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
+        else break; // lead byte inválido
+
+        if (i + n > s.size()) break; // sequência incompleta — espera mais bytes
+
+        bool ok = true;
+        for (size_t j = 1; j < n; j++) {
+            if (((unsigned char)s[i + j] & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | ((unsigned char)s[i + j] & 0x3F);
+        }
+        if (!ok) break;
+
+        i += n;
+
+        if (cp < 0x10000) {
+            out.push_back((char16_t)cp);
+        } else if (cp <= 0x10FFFF) {
+            cp -= 0x10000;
+            out.push_back((char16_t)(0xD800 + (cp >> 10)));
+            out.push_back((char16_t)(0xDC00 + (cp & 0x3FF)));
+        }
+    }
+    return i;
+}
+
+// Callback que chama onToken(String) no Kotlin, aceitando UTF-16.
+static void call_on_token_utf16(JNIEnv* env, jobject cb, jmethodID mid,
+                                 const std::u16string& utf16) {
+    if (utf16.empty()) return;
+    jstring jtok = env->NewString((const jchar*)utf16.data(), utf16.size());
     env->CallVoidMethod(cb, mid, jtok);
     env->DeleteLocalRef(jtok);
 }
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeBackendInit(
@@ -54,19 +101,21 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeBackendFree(
     LOGI("Backend liberado");
 }
 
+// ---------------------------------------------------------------------------
+// Load / Free
+// ---------------------------------------------------------------------------
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeLoadModel(
         JNIEnv* env, jobject,
         jstring jpath, jint n_ctx, jint n_threads, jboolean use_mmap) {
 
     std::string path = jstring_to_std(env, jpath);
-    LOGI("Carregando modelo: %s (ctx=%d, threads=%d, mmap_req=%d)",
-         path.c_str(), n_ctx, n_threads, (int)use_mmap);
+    LOGI("Carregando modelo: %s (ctx=%d, threads=%d)",
+         path.c_str(), n_ctx, n_threads);
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = 0;
-    // Nota: 'use_mmap' e 'use_mlock' não existem mais nesta versão.
-    // O mmap é gerenciado internamente pelo loader.
 
     llama_model* model = llama_model_load_from_file(path.c_str(), mparams);
     if (!model) {
@@ -93,7 +142,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeLoadModel(
     h->vocab = llama_model_get_vocab(model);
 
     LOGI("Modelo carregado. n_ctx efetivo = %u", llama_n_ctx(ctx));
-
     return reinterpret_cast<jlong>(h);
 }
 
@@ -129,6 +177,10 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeCountTokens(
     return n;
 }
 
+// ---------------------------------------------------------------------------
+// Generate
+// ---------------------------------------------------------------------------
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
         JNIEnv* env, jobject, jlong handle, jstring jprompt,
@@ -150,7 +202,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
     }
 
     h->cancel_flag.store(false);
-
     std::lock_guard<std::mutex> lock(h->gen_mutex);
 
     std::string prompt = jstring_to_std(env, jprompt);
@@ -179,7 +230,6 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler* smpl = llama_sampler_chain_init(sparams);
 
-    // CORREÇÃO: llama_sampler_init_penalties agora exige n_vocab como 1º arg
     const int32_t n_vocab = llama_vocab_n_tokens(h->vocab);
     if (repeat_last_n > 0 && repeat_penalty != 1.0f) {
         llama_sampler_chain_add(smpl,
@@ -199,10 +249,11 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
         seed >= 0 ? (uint32_t)seed : LLAMA_DEFAULT_SEED));
 
     int n_generated = 0;
+    std::string pending_utf8; // buffer de bytes UTF-8 incompletos
 
     while (n_generated < max_tokens) {
         if (h->cancel_flag.load()) {
-            LOGI("Geração cancelada pelo usuário");
+            LOGI("Geração cancelada");
             break;
         }
 
@@ -218,8 +269,23 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
         char buf[256];
         int n = llama_token_to_piece(h->vocab, new_token, buf, sizeof(buf), 0, true);
         if (n > 0) {
-            std::string piece(buf, n);
-            call_on_token(env, callback, mid_on_token, piece);
+            pending_utf8.append(buf, n);
+
+            std::u16string utf16;
+            size_t consumed = utf8_decode(pending_utf8, utf16);
+
+            if (consumed > 0) {
+                pending_utf8.erase(0, consumed);
+                call_on_token_utf16(env, callback, mid_on_token, utf16);
+            } else if (!pending_utf8.empty()) {
+                // Se o primeiro byte é uma continuação órfã ou inválido, descarta
+                unsigned char c = (unsigned char)pending_utf8[0];
+                bool valid_lead = (c < 0x80) || ((c >= 0xC0) && (c <= 0xF7));
+                if (!valid_lead) {
+                    pending_utf8.erase(0, 1);
+                }
+                // Se é lead válido, mantém e espera o próximo token
+            }
         }
 
         batch = llama_batch_get_one(&new_token, 1);
@@ -231,6 +297,15 @@ Java_com_weirdo_neural_core_llm_llamacpp_LlamaBridge_nativeGenerate(
         }
 
         n_generated++;
+    }
+
+    // Flush final: se sobrou algo que decodifica, emite
+    if (!pending_utf8.empty()) {
+        std::u16string utf16;
+        size_t consumed = utf8_decode(pending_utf8, utf16);
+        if (consumed > 0) {
+            call_on_token_utf16(env, callback, mid_on_token, utf16);
+        }
     }
 
     llama_sampler_free(smpl);
