@@ -29,13 +29,10 @@ class TerminalManager @Inject constructor(
         private const val READY_FLAG = ".ready"
         private const val ROOTFS_ASSET = "alpine-rootfs.bin"
 
-        // Executáveis (em nativeLibraryDir)
         private const val PROOT_NAME = "libproot.so"
         private const val BUSYBOX_NAME = "libbusybox.so"
-
-        // Bibliotecas (em filesDir/alpine/, copiadas de assets)
-        private const val LIBTALLOC_ASSET = "libtalloc.so.2"
-        private const val LIBSHMEM_ASSET = "libandroid-shmem.so"
+        private const val LIBTALLOC_NAME = "libtalloc.so.2"
+        private const val LIBSHMEM_NAME = "libandroid-shmem.so"
     }
 
     private val alpineDir: File
@@ -54,10 +51,10 @@ class TerminalManager @Inject constructor(
         get() = File(nativeLibDir, BUSYBOX_NAME)
 
     private val libTalloc: File
-        get() = File(alpineDir, LIBTALLOC_ASSET)
+        get() = File(alpineDir, LIBTALLOC_NAME)
 
     private val libShmem: File
-        get() = File(alpineDir, LIBSHMEM_ASSET)
+        get() = File(alpineDir, LIBSHMEM_NAME)
 
     val workspaceDir: File
         get() = File(context.getExternalFilesDir(null), "workspace").apply { mkdirs() }
@@ -86,9 +83,8 @@ class TerminalManager @Inject constructor(
                 throw IllegalStateException("busybox não encontrado em ${busyboxBinary.absolutePath}")
             }
 
-            // Copia as .so de assets para filesDir/alpine
-            copyAsset(LIBTALLOC_ASSET, libTalloc)
-            copyAsset(LIBSHMEM_ASSET, libShmem)
+            copyAsset(LIBTALLOC_NAME, libTalloc)
+            copyAsset(LIBSHMEM_NAME, libShmem)
             libTalloc.setReadable(true, false)
             libShmem.setReadable(true, false)
 
@@ -247,10 +243,8 @@ class TerminalManager @Inject constructor(
 
         val pb = ProcessBuilder(args)
         pb.environment().clear()
-        // libtalloc.so.2 e libandroid-shmem.so estão em filesDir/alpine/
         pb.environment()["LD_LIBRARY_PATH"] = alpineDir.absolutePath
         pb.environment()["PROOT_TMP_DIR"] = context.cacheDir.absolutePath
-        pb.environment()["PROOT_NO_SECCOMP"] = "1"
         pb.directory(alpineDir)
 
         val process = try {

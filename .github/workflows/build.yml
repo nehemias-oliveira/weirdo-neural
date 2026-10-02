@@ -35,9 +35,6 @@ jobs:
           yes | $SDKMANAGER --install "ndk;27.2.12479018" "cmake;3.22.1" || true
           ls -la "$ANDROID_HOME/ndk/" || true
 
-      - name: Build termux proot
-        run: .github/scripts/build-proot.sh "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
