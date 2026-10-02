@@ -14,9 +14,7 @@ if [ ! -f "$ANDROID_HEADERS/sys/shm.h" ]; then
     echo "ERRO: sys/shm.h não encontrado em $ANDROID_HEADERS"
     exit 1
 fi
-echo "Headers Android encontrados:"
-ls -la "$ANDROID_HEADERS"
-ls -la "$ANDROID_HEADERS/sys"
+echo "Headers Android OK"
 
 # 2. Clona o fork do Termux
 PROOT_SRC=/tmp/proot-src
@@ -28,7 +26,6 @@ cd "$PROOT_SRC"
 # 3. Toolchain do NDK
 NDK="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/27.2.12479018}"
 if [ ! -d "$NDK" ]; then
-    # fallback: usa o que existir
     NDK=$(ls -d $ANDROID_HOME/ndk/* | tail -1)
 fi
 echo "NDK: $NDK"
@@ -45,9 +42,8 @@ mkdir -p "$LIBDIR"
 cp "$GITHUB_WORKSPACE/app/src/main/assets/libtalloc.so.2"      "$LIBDIR/"
 cp "$GITHUB_WORKSPACE/app/src/main/assets/libandroid-shmem.so" "$LIBDIR/"
 
-# Cria symlinks para o linker achar -ltalloc e -landroid-shmem
-ln -sf "$LIBDIR/libtalloc.so.2"        "$LIBDIR/libtalloc.so"
-ln -sf "$LIBDIR/libandroid-shmem.so"   "$LIBDIR/libandroid-shmem.so"
+# Symlink apenas para o talloc (que tem sufixo numérico no nome real)
+ln -sf "libtalloc.so.2" "$LIBDIR/libtalloc.so"
 
 # 5. Compila
 cd src
