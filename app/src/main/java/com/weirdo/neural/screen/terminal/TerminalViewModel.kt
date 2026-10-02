@@ -3,7 +3,6 @@ package com.weirdo.neural.screen.terminal
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.weirdo.neural.core.data.terminal.PrepareProgress
-import com.weirdo.neural.core.data.terminal.TerminalLine
 import com.weirdo.neural.core.data.terminal.TerminalManager
 import com.weirdo.neural.core.data.terminal.TerminalStream
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -46,7 +45,7 @@ class TerminalViewModel @Inject constructor(
         if (!terminal.isReady) {
             prepare()
         } else {
-            appendLocal("Alpine pronto. Digite um comando (ex: uname -a).", TerminalStream.STDOUT)
+            appendLocal("Ubuntu pronto. Digite um comando (ex: uname -a).", TerminalStream.STDOUT)
         }
     }
 
@@ -78,7 +77,7 @@ class TerminalViewModel @Inject constructor(
                                 prepareError = null,
                             )
                         }
-                        appendLocal("Alpine pronto. Digite um comando.", TerminalStream.STDOUT)
+                        appendLocal("Ubuntu pronto. Digite um comando.", TerminalStream.STDOUT)
                     }
 
                     is PrepareProgress.Error -> {
@@ -138,7 +137,6 @@ class TerminalViewModel @Inject constructor(
                     else -> appendLocal(line.text, line.stream)
                 }
             }
-            // Se o flow terminou sem EXIT (raro), limpa estado
             _uiState.update { it.copy(isRunning = false, currentCommand = null) }
         }
     }
@@ -167,7 +165,6 @@ class TerminalViewModel @Inject constructor(
     private fun appendLocal(text: String, stream: TerminalStream) {
         _uiState.update {
             val newOutput = it.output + OutputLine(stream, text)
-            // Cap em 2000 linhas para não estourar memória
             val capped = if (newOutput.size > 2000) newOutput.takeLast(2000) else newOutput
             it.copy(output = capped)
         }

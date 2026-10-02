@@ -198,9 +198,9 @@ class TerminalManager @Inject constructor(
             "-0",
             "--link2symlink",
             "-w", workingDir,
-            "-b", "/dev",
-            "-b", "/proc",
-            "-b", "/sys",
+            "-b", "/dev:/dev",
+            "-b", "/proc:/proc",
+            "-b", "/sys:/sys",
             "-b", "${workspaceDir.absolutePath}:/workspace",
             "/bin/sh", "-c", command,
         )
@@ -211,7 +211,6 @@ class TerminalManager @Inject constructor(
         pb.environment().clear()
         pb.environment()["PROROOT_TMP_DIR"] = context.cacheDir.absolutePath
         pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
-        pb.environment()["PROOT_TMP_DIR"] = context.cacheDir.absolutePath
         pb.directory(alpineDir)
 
         val process = try {
