@@ -39,7 +39,7 @@ jobs:
         run: |
           mkdir -p app/src/main/assets
           curl -L -o app/src/main/assets/alpine-rootfs.bin \
-            "https://github.com/nehemias-oliveira/weirdo-neural/releases/download/rootfs-v1/alpine-rootfs.bin"
+            "https://github.com/nehemias-oliveira/weirdo-neural/releases/download/rootfs-v1/alpine-rootfs.tar.gz"
           ls -lh app/src/main/assets/alpine-rootfs.bin
 
       - name: Setup Gradle
