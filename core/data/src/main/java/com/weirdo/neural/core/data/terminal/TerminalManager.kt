@@ -28,6 +28,11 @@ class TerminalManager @Inject constructor(
         private const val ROOTFS_DIR = "rootfs"
         private const val READY_FLAG = ".ready"
         private const val ROOTFS_ASSET = "alpine-rootfs.bin"
+
+        // Nomes em nativeLibraryDir — são os mesmos que colocamos em jniLibs
+        private const val PROOT_NAME = "libproot.so"
+        private const val LIBTALLOC_NAME = "libtalloc.so.2"
+        private const val LIBSHMEM_NAME = "libandroid-shmem.so"
     }
 
     private val alpineDir: File
@@ -36,14 +41,21 @@ class TerminalManager @Inject constructor(
     private val rootfsDir: File
         get() = File(alpineDir, ROOTFS_DIR)
 
+    /**
+     * nativeLibraryDir é o único lugar do app onde o Android permite exec.
+     * É para lá que vão proot e as .so quando o APK é instalado.
+     */
+    private val nativeLibDir: File
+        get() = File(context.applicationInfo.nativeLibraryDir)
+
     private val prootBinary: File
-        get() = File(alpineDir, "proot")
+        get() = File(nativeLibDir, PROOT_NAME)
 
     private val libTalloc: File
-        get() = File(alpineDir, "libtalloc.so.2")
+        get() = File(nativeLibDir, LIBTALLOC_NAME)
 
     private val libShmem: File
-        get() = File(alpineDir, "libandroid-shmem.so")
+        get() = File(nativeLibDir, LIBSHMEM_NAME)
 
     val workspaceDir: File
         get() = File(context.getExternalFilesDir(null), "workspace").apply { mkdirs() }
@@ -66,25 +78,36 @@ class TerminalManager @Inject constructor(
         emit(PrepareProgress.Starting)
 
         try {
+            // 1. Verifica binários nativos
             emit(PrepareProgress.ExtractingBinaries)
-            copyAsset("proot", prootBinary)
-            copyAsset("libtalloc.so.2", libTalloc)
-            copyAsset("libandroid-shmem.so", libShmem)
-            prootBinary.setExecutable(true, false)
-            libTalloc.setReadable(true, false)
-            libShmem.setReadable(true, false)
+            if (!prootBinary.exists()) {
+                throw IllegalStateException(
+                    "proot não encontrado em ${prootBinary.absolutePath}.\n" +
+                    "Verifique se jniLibs/arm64-v8a/libproot.so existe no projeto."
+                )
+            }
+            if (!libTalloc.exists()) {
+                Log.w(TAG, "libtalloc não encontrada em ${libTalloc.absolutePath}")
+            }
+            if (!libShmem.exists()) {
+                Log.w(TAG, "libandroid-shmem não encontrada em ${libShmem.absolutePath}")
+            }
 
+            // 2. Extrai o rootfs
             emit(PrepareProgress.ExtractingRootfs(0))
             rootfsDir.mkdirs()
             extractRootfs()
             emit(PrepareProgress.ExtractingRootfs(100))
 
+            // 3. DNS padrão
             val resolv = File(rootfsDir, "etc/resolv.conf")
             resolv.parentFile?.mkdirs()
             resolv.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
 
+            // 4. Workspace dentro do rootfs
             File(rootfsDir, "workspace").mkdirs()
 
+            // 5. Flag de pronto
             File(alpineDir, READY_FLAG).writeText(System.currentTimeMillis().toString())
 
             Log.i(TAG, "Alpine pronto em ${alpineDir.absolutePath}")
@@ -109,15 +132,6 @@ class TerminalManager @Inject constructor(
             emit(PrepareProgress.Error(detail, t))
         }
     }.flowOn(Dispatchers.IO)
-
-    private fun copyAsset(assetName: String, target: File) {
-        if (target.exists() && target.length() > 0) return
-        context.assets.open(assetName).use { input ->
-            FileOutputStream(target).use { output ->
-                input.copyTo(output, 64 * 1024)
-            }
-        }
-    }
 
     private fun extractRootfs() {
         if (File(rootfsDir, "bin/busybox").exists()) {
@@ -228,7 +242,7 @@ class TerminalManager @Inject constructor(
 
         val pb = ProcessBuilder(args)
         pb.environment().clear()
-        pb.environment()["LD_LIBRARY_PATH"] = alpineDir.absolutePath
+        pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
         pb.environment()["PROOT_TMP_DIR"] = context.cacheDir.absolutePath
         pb.environment()["PROOT_NO_SECCOMP"] = "1"
         pb.directory(alpineDir)
