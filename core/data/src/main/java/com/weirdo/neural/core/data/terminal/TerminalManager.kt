@@ -27,6 +27,7 @@ class TerminalManager @Inject constructor(
         private const val ALPINE_DIR = "alpine"
         private const val ROOTFS_DIR = "rootfs"
         private const val READY_FLAG = ".ready"
+        private const val ROOTFS_ASSET = "alpine-rootfs.bin"
     }
 
     private val alpineDir: File
@@ -90,7 +91,22 @@ class TerminalManager @Inject constructor(
             emit(PrepareProgress.Ready)
         } catch (t: Throwable) {
             Log.e(TAG, "Falha ao preparar Alpine", t)
-            emit(PrepareProgress.Error(t.message ?: "Erro desconhecido", t))
+            val detail = buildString {
+                append(t.javaClass.simpleName)
+                append(": ")
+                append(t.message ?: "sem mensagem")
+                var cause = t.cause
+                var depth = 0
+                while (cause != null && depth < 3) {
+                    append("\n↳ ")
+                    append(cause.javaClass.simpleName)
+                    append(": ")
+                    append(cause.message ?: "sem mensagem")
+                    cause = cause.cause
+                    depth++
+                }
+            }
+            emit(PrepareProgress.Error(detail, t))
         }
     }.flowOn(Dispatchers.IO)
 
@@ -109,7 +125,7 @@ class TerminalManager @Inject constructor(
             return
         }
 
-        context.assets.open("alpine-rootfs.tar.gz").use { raw ->
+        context.assets.open(ROOTFS_ASSET).use { raw ->
             BufferedInputStream(raw).use { buffered ->
                 GzipCompressorInputStream(buffered).use { gzip ->
                     TarArchiveInputStream(gzip).use { tar ->
