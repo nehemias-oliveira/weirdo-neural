@@ -39,7 +39,7 @@ android {
     buildFeatures { compose = true }
 
     androidResources {
-        noCompress += listOf("bin")
+        noCompress += listOf("bin", "so")
     }
 
     packaging {

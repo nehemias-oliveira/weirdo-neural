@@ -29,10 +29,7 @@ class TerminalManager @Inject constructor(
         private const val READY_FLAG = ".ready"
         private const val ROOTFS_ASSET = "alpine-rootfs.bin"
 
-        private const val PROOT_NAME = "libproot.so"
-        private const val BUSYBOX_NAME = "libbusybox.so"
-        private const val LIBTALLOC_NAME = "libtalloc.so.2"
-        private const val LIBSHMEM_NAME = "libandroid-shmem.so"
+        private const val PROROOT_NAME = "libproroot.so"
     }
 
     private val alpineDir: File
@@ -44,27 +41,16 @@ class TerminalManager @Inject constructor(
     private val nativeLibDir: File
         get() = File(context.applicationInfo.nativeLibraryDir)
 
-    private val prootBinary: File
-        get() = File(nativeLibDir, PROOT_NAME)
-
-    private val busyboxBinary: File
-        get() = File(nativeLibDir, BUSYBOX_NAME)
-
-    private val libTalloc: File
-        get() = File(alpineDir, LIBTALLOC_NAME)
-
-    private val libShmem: File
-        get() = File(alpineDir, LIBSHMEM_NAME)
+    private val prorootBinary: File
+        get() = File(nativeLibDir, PROROOT_NAME)
 
     val workspaceDir: File
         get() = File(context.getExternalFilesDir(null), "workspace").apply { mkdirs() }
 
     val isReady: Boolean
         get() = File(alpineDir, READY_FLAG).exists()
-            && prootBinary.exists()
-            && busyboxBinary.exists()
-            && libTalloc.exists()
-            && File(rootfsDir, "bin/busybox").exists()
+            && prorootBinary.exists()
+            && File(rootfsDir, "bin/bash").exists()
 
     fun prepare(): Flow<PrepareProgress> = flow {
         if (isReady) {
@@ -76,17 +62,11 @@ class TerminalManager @Inject constructor(
 
         try {
             emit(PrepareProgress.ExtractingBinaries)
-            if (!prootBinary.exists()) {
-                throw IllegalStateException("proot não encontrado em ${prootBinary.absolutePath}")
+            if (!prorootBinary.exists()) {
+                throw IllegalStateException(
+                    "proroot não encontrado em ${prorootBinary.absolutePath}"
+                )
             }
-            if (!busyboxBinary.exists()) {
-                throw IllegalStateException("busybox não encontrado em ${busyboxBinary.absolutePath}")
-            }
-
-            copyAsset(LIBTALLOC_NAME, libTalloc)
-            copyAsset(LIBSHMEM_NAME, libShmem)
-            libTalloc.setReadable(true, false)
-            libShmem.setReadable(true, false)
 
             emit(PrepareProgress.ExtractingRootfs(0))
             rootfsDir.mkdirs()
@@ -101,10 +81,10 @@ class TerminalManager @Inject constructor(
 
             File(alpineDir, READY_FLAG).writeText(System.currentTimeMillis().toString())
 
-            Log.i(TAG, "Alpine pronto em ${alpineDir.absolutePath}")
+            Log.i(TAG, "Rootfs pronto em ${rootfsDir.absolutePath}")
             emit(PrepareProgress.Ready)
         } catch (t: Throwable) {
-            Log.e(TAG, "Falha ao preparar Alpine", t)
+            Log.e(TAG, "Falha ao preparar rootfs", t)
             val detail = buildString {
                 append(t.javaClass.simpleName)
                 append(": ")
@@ -124,17 +104,8 @@ class TerminalManager @Inject constructor(
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun copyAsset(assetName: String, target: File) {
-        if (target.exists() && target.length() > 0) return
-        context.assets.open(assetName).use { input ->
-            FileOutputStream(target).use { output ->
-                input.copyTo(output, 64 * 1024)
-            }
-        }
-    }
-
     private fun extractRootfs() {
-        if (File(rootfsDir, "bin/busybox").exists()) {
+        if (File(rootfsDir, "bin/bash").exists()) {
             Log.i(TAG, "Rootfs já extraído, pulando")
             return
         }
@@ -211,10 +182,10 @@ class TerminalManager @Inject constructor(
 
     fun execute(
         command: String,
-        workingDir: String = "/workspace",
+        workingDir: String = "/root",
     ): Flow<TerminalLine> = callbackFlow {
         if (!isReady) {
-            trySend(TerminalLine(TerminalStream.STDERR, "Alpine não preparado."))
+            trySend(TerminalLine(TerminalStream.STDERR, "Rootfs não preparado."))
             close()
             return@callbackFlow
         }
@@ -222,20 +193,15 @@ class TerminalManager @Inject constructor(
         workspaceDir.mkdirs()
 
         val args = listOf(
-            prootBinary.absolutePath,
+            prorootBinary.absolutePath,
             "-r", rootfsDir.absolutePath,
             "-0",
+            "--link2symlink",
             "-w", workingDir,
             "-b", "/dev",
             "-b", "/proc",
             "-b", "/sys",
             "-b", "${workspaceDir.absolutePath}:/workspace",
-            "-b", "${busyboxBinary.absolutePath}:/bin/busybox",
-            "--kill-on-exit",
-            "/bin/busybox", "env", "-i",
-            "HOME=/root",
-            "PATH=/sbin:/usr/sbin:/bin:/usr/bin",
-            "TERM=xterm",
             "/bin/sh", "-c", command,
         )
 
@@ -243,14 +209,15 @@ class TerminalManager @Inject constructor(
 
         val pb = ProcessBuilder(args)
         pb.environment().clear()
-        pb.environment()["LD_LIBRARY_PATH"] = alpineDir.absolutePath
+        pb.environment()["PROROOT_TMP_DIR"] = context.cacheDir.absolutePath
+        pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
         pb.environment()["PROOT_TMP_DIR"] = context.cacheDir.absolutePath
         pb.directory(alpineDir)
 
         val process = try {
             pb.start()
         } catch (t: Throwable) {
-            trySend(TerminalLine(TerminalStream.STDERR, "Falha ao iniciar proot: ${t.message}"))
+            trySend(TerminalLine(TerminalStream.STDERR, "Falha ao iniciar proroot: ${t.message}"))
             close()
             return@callbackFlow
         }
