@@ -11,3 +11,5 @@ local.properties
 *.apk
 *.aab
 *.keystore
+# Rootfs grande — hospedado em GitHub Releases
+app/src/main/assets/alpine-rootfs.bin
