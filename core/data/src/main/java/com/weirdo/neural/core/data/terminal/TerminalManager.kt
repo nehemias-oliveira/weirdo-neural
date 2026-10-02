@@ -29,11 +29,13 @@ class TerminalManager @Inject constructor(
         private const val READY_FLAG = ".ready"
         private const val ROOTFS_ASSET = "alpine-rootfs.bin"
 
-        // Todos em nativeLibraryDir
+        // Executáveis (em nativeLibraryDir)
         private const val PROOT_NAME = "libproot.so"
         private const val BUSYBOX_NAME = "libbusybox.so"
-        private const val LIBTALLOC_NAME = "libtalloc.so"
-        private const val LIBSHMEM_NAME = "libandroid-shmem.so"
+
+        // Bibliotecas (em filesDir/alpine/, copiadas de assets)
+        private const val LIBTALLOC_ASSET = "libtalloc.so.2"
+        private const val LIBSHMEM_ASSET = "libandroid-shmem.so"
     }
 
     private val alpineDir: File
@@ -52,10 +54,10 @@ class TerminalManager @Inject constructor(
         get() = File(nativeLibDir, BUSYBOX_NAME)
 
     private val libTalloc: File
-        get() = File(nativeLibDir, LIBTALLOC_NAME)
+        get() = File(alpineDir, LIBTALLOC_ASSET)
 
     private val libShmem: File
-        get() = File(nativeLibDir, LIBSHMEM_NAME)
+        get() = File(alpineDir, LIBSHMEM_ASSET)
 
     val workspaceDir: File
         get() = File(context.getExternalFilesDir(null), "workspace").apply { mkdirs() }
@@ -64,11 +66,8 @@ class TerminalManager @Inject constructor(
         get() = File(alpineDir, READY_FLAG).exists()
             && prootBinary.exists()
             && busyboxBinary.exists()
+            && libTalloc.exists()
             && File(rootfsDir, "bin/busybox").exists()
-
-    // -----------------------------------------------------------------------
-    // Prepare
-    // -----------------------------------------------------------------------
 
     fun prepare(): Flow<PrepareProgress> = flow {
         if (isReady) {
@@ -86,12 +85,12 @@ class TerminalManager @Inject constructor(
             if (!busyboxBinary.exists()) {
                 throw IllegalStateException("busybox não encontrado em ${busyboxBinary.absolutePath}")
             }
-            if (!libTalloc.exists()) {
-                Log.w(TAG, "libtalloc não encontrada em ${libTalloc.absolutePath}")
-            }
-            if (!libShmem.exists()) {
-                Log.w(TAG, "libandroid-shmem não encontrada em ${libShmem.absolutePath}")
-            }
+
+            // Copia as .so de assets para filesDir/alpine
+            copyAsset(LIBTALLOC_ASSET, libTalloc)
+            copyAsset(LIBSHMEM_ASSET, libShmem)
+            libTalloc.setReadable(true, false)
+            libShmem.setReadable(true, false)
 
             emit(PrepareProgress.ExtractingRootfs(0))
             rootfsDir.mkdirs()
@@ -128,6 +127,15 @@ class TerminalManager @Inject constructor(
             emit(PrepareProgress.Error(detail, t))
         }
     }.flowOn(Dispatchers.IO)
+
+    private fun copyAsset(assetName: String, target: File) {
+        if (target.exists() && target.length() > 0) return
+        context.assets.open(assetName).use { input ->
+            FileOutputStream(target).use { output ->
+                input.copyTo(output, 64 * 1024)
+            }
+        }
+    }
 
     private fun extractRootfs() {
         if (File(rootfsDir, "bin/busybox").exists()) {
@@ -205,10 +213,6 @@ class TerminalManager @Inject constructor(
         Log.i(TAG, "Extração: $entryCount entradas, $skipped ignoradas, $symlinks symlinks")
     }
 
-    // -----------------------------------------------------------------------
-    // Execute
-    // -----------------------------------------------------------------------
-
     fun execute(
         command: String,
         workingDir: String = "/workspace",
@@ -243,7 +247,8 @@ class TerminalManager @Inject constructor(
 
         val pb = ProcessBuilder(args)
         pb.environment().clear()
-        pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
+        // libtalloc.so.2 e libandroid-shmem.so estão em filesDir/alpine/
+        pb.environment()["LD_LIBRARY_PATH"] = alpineDir.absolutePath
         pb.environment()["PROOT_TMP_DIR"] = context.cacheDir.absolutePath
         pb.environment()["PROOT_NO_SECCOMP"] = "1"
         pb.directory(alpineDir)
