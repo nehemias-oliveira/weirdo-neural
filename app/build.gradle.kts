@@ -44,7 +44,8 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = false
+            useLegacyPackaging = true
+            keepDebugSymbols += listOf("**/libproot.so")
         }
     }
 }
