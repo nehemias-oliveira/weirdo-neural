@@ -29,8 +29,10 @@ class TerminalManager @Inject constructor(
         private const val READY_FLAG = ".ready"
         private const val ROOTFS_ASSET = "alpine-rootfs.bin"
 
+        // Todos em nativeLibraryDir
         private const val PROOT_NAME = "libproot.so"
-        private const val LIBTALLOC_NAME = "libtalloc.so.2"
+        private const val BUSYBOX_NAME = "libbusybox.so"
+        private const val LIBTALLOC_NAME = "libtalloc.so"
         private const val LIBSHMEM_NAME = "libandroid-shmem.so"
     }
 
@@ -46,11 +48,14 @@ class TerminalManager @Inject constructor(
     private val prootBinary: File
         get() = File(nativeLibDir, PROOT_NAME)
 
+    private val busyboxBinary: File
+        get() = File(nativeLibDir, BUSYBOX_NAME)
+
     private val libTalloc: File
-        get() = File(alpineDir, LIBTALLOC_NAME)
+        get() = File(nativeLibDir, LIBTALLOC_NAME)
 
     private val libShmem: File
-        get() = File(alpineDir, LIBSHMEM_NAME)
+        get() = File(nativeLibDir, LIBSHMEM_NAME)
 
     val workspaceDir: File
         get() = File(context.getExternalFilesDir(null), "workspace").apply { mkdirs() }
@@ -58,8 +63,12 @@ class TerminalManager @Inject constructor(
     val isReady: Boolean
         get() = File(alpineDir, READY_FLAG).exists()
             && prootBinary.exists()
-            && libTalloc.exists()
+            && busyboxBinary.exists()
             && File(rootfsDir, "bin/busybox").exists()
+
+    // -----------------------------------------------------------------------
+    // Prepare
+    // -----------------------------------------------------------------------
 
     fun prepare(): Flow<PrepareProgress> = flow {
         if (isReady) {
@@ -71,17 +80,18 @@ class TerminalManager @Inject constructor(
 
         try {
             emit(PrepareProgress.ExtractingBinaries)
-
             if (!prootBinary.exists()) {
-                throw IllegalStateException(
-                    "proot não encontrado em ${prootBinary.absolutePath}"
-                )
+                throw IllegalStateException("proot não encontrado em ${prootBinary.absolutePath}")
             }
-
-            copyAsset(LIBTALLOC_NAME, libTalloc)
-            copyAsset(LIBSHMEM_NAME, libShmem)
-            libTalloc.setReadable(true, false)
-            libShmem.setReadable(true, false)
+            if (!busyboxBinary.exists()) {
+                throw IllegalStateException("busybox não encontrado em ${busyboxBinary.absolutePath}")
+            }
+            if (!libTalloc.exists()) {
+                Log.w(TAG, "libtalloc não encontrada em ${libTalloc.absolutePath}")
+            }
+            if (!libShmem.exists()) {
+                Log.w(TAG, "libandroid-shmem não encontrada em ${libShmem.absolutePath}")
+            }
 
             emit(PrepareProgress.ExtractingRootfs(0))
             rootfsDir.mkdirs()
@@ -119,15 +129,6 @@ class TerminalManager @Inject constructor(
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun copyAsset(assetName: String, target: File) {
-        if (target.exists() && target.length() > 0) return
-        context.assets.open(assetName).use { input ->
-            FileOutputStream(target).use { output ->
-                input.copyTo(output, 64 * 1024)
-            }
-        }
-    }
-
     private fun extractRootfs() {
         if (File(rootfsDir, "bin/busybox").exists()) {
             Log.i(TAG, "Rootfs já extraído, pulando")
@@ -146,7 +147,6 @@ class TerminalManager @Inject constructor(
                         while (entry != null) {
                             entryCount++
                             val name = entry.name
-                            // Bloqueio simples e confiável
                             if (name.contains("..")) {
                                 Log.w(TAG, "Path traversal ignorado: $name")
                                 skipped++
@@ -192,7 +192,6 @@ class TerminalManager @Inject constructor(
                                     }
                                     val mode = entry.mode
                                     if (mode and 0b001_000_000 != 0) outFile.setExecutable(true, false)
-                                    // Garante leitura para todos os arquivos regulares
                                     outFile.setReadable(true, false)
                                 }
                             }
@@ -203,8 +202,12 @@ class TerminalManager @Inject constructor(
             }
         }
 
-        Log.i(TAG, "Extração concluída: $entryCount entradas, $skipped ignoradas, $symlinks symlinks")
+        Log.i(TAG, "Extração: $entryCount entradas, $skipped ignoradas, $symlinks symlinks")
     }
+
+    // -----------------------------------------------------------------------
+    // Execute
+    // -----------------------------------------------------------------------
 
     fun execute(
         command: String,
@@ -218,27 +221,6 @@ class TerminalManager @Inject constructor(
 
         workspaceDir.mkdirs()
 
-        // ============ DIAGNÓSTICO PRÉ-EXECUÇÃO ============
-        val busybox = File(rootfsDir, "bin/busybox")
-        val musl = File(rootfsDir, "lib/ld-musl-aarch64.so.1")
-        val sh = File(rootfsDir, "bin/sh")
-
-        trySend(TerminalLine(TerminalStream.STDERR, "--- diag ---"))
-        trySend(TerminalLine(TerminalStream.STDERR,
-            "busybox: exists=${busybox.exists()} exec=${busybox.canExecute()} len=${busybox.length()}"))
-        trySend(TerminalLine(TerminalStream.STDERR,
-            "musl:    exists=${musl.exists()} read=${musl.canRead()} len=${musl.length()}"))
-        trySend(TerminalLine(TerminalStream.STDERR,
-            "sh:      exists=${sh.exists()} symlink=${java.nio.file.Files.isSymbolicLink(sh.toPath())}"))
-        trySend(TerminalLine(TerminalStream.STDERR,
-            "proot:   exists=${prootBinary.exists()} exec=${prootBinary.canExecute()} path=${prootBinary.absolutePath}"))
-        trySend(TerminalLine(TerminalStream.STDERR,
-            "libtalloc:  exists=${libTalloc.exists()} len=${libTalloc.length()}"))
-        trySend(TerminalLine(TerminalStream.STDERR,
-            "libshmem:   exists=${libShmem.exists()} len=${libShmem.length()}"))
-        trySend(TerminalLine(TerminalStream.STDERR, "------------"))
-        // ============ FIM DIAGNÓSTICO ============
-
         val args = listOf(
             prootBinary.absolutePath,
             "-r", rootfsDir.absolutePath,
@@ -248,6 +230,7 @@ class TerminalManager @Inject constructor(
             "-b", "/proc",
             "-b", "/sys",
             "-b", "${workspaceDir.absolutePath}:/workspace",
+            "-b", "${busyboxBinary.absolutePath}:/bin/busybox",
             "--kill-on-exit",
             "/bin/busybox", "env", "-i",
             "HOME=/root",
@@ -260,7 +243,7 @@ class TerminalManager @Inject constructor(
 
         val pb = ProcessBuilder(args)
         pb.environment().clear()
-        pb.environment()["LD_LIBRARY_PATH"] = alpineDir.absolutePath
+        pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
         pb.environment()["PROOT_TMP_DIR"] = context.cacheDir.absolutePath
         pb.environment()["PROOT_NO_SECCOMP"] = "1"
         pb.directory(alpineDir)
